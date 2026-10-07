@@ -1,0 +1,24 @@
+# Core API & ASGI Web Framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+
+# Database & Async IO
+sqlalchemy>=2.0.35
+asyncpg>=0.29.0
+alembic>=1.13.0
+
+# Security & Crypto
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# LLM Provider SDKs & HTTP Clients
+httpx>=0.27.0
+google-generativeai>=0.8.0
+openai>=1.52.0
+anthropic>=0.36.0
+
+# Background Tasks & Cache
+redis>=5.1.0
+tiktoken>=0.8.0
