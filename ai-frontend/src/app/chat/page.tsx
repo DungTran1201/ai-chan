@@ -596,20 +596,25 @@ export default function ChatWorkspacePage() {
           justifyContent: 'space-between',
           background: 'rgba(0,0,0,0.2)'
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+          <Link
+            href="/settings"
+            title="Xem hồ sơ & Cài đặt"
+            style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, textDecoration: 'none', cursor: 'pointer' }}
+          >
             <div style={{
               width: '32px',
               height: '32px',
               borderRadius: '50%',
-              background: 'var(--accent-gradient)',
+              background: currentUser?.avatar_url ? `url(${currentUser.avatar_url}) center/cover no-repeat` : 'var(--accent-gradient)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               fontSize: '0.85rem',
               fontWeight: 700,
+              color: '#fff',
               flexShrink: 0
             }}>
-              {currentUser?.email?.[0]?.toUpperCase() || 'U'}
+              {!currentUser?.avatar_url && (currentUser?.email?.[0]?.toUpperCase() || 'U')}
             </div>
             <div style={{ overflow: 'hidden' }}>
               <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -619,23 +624,43 @@ export default function ChatWorkspacePage() {
                 {currentUser?.email || ''}
               </div>
             </div>
+          </Link>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
+            <Link
+              href="/settings"
+              title="Cài đặt tài khoản"
+              aria-label="Cài đặt tài khoản"
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-muted)',
+                fontSize: '1rem',
+                cursor: 'pointer',
+                padding: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                textDecoration: 'none'
+              }}
+            >
+              ⚙️
+            </Link>
+            <button
+              type="button"
+              onClick={handleLogout}
+              title="Đăng xuất"
+              aria-label="Đăng xuất"
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-muted)',
+                fontSize: '1rem',
+                cursor: 'pointer',
+                padding: '6px'
+              }}
+            >
+              🚪
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={handleLogout}
-            title="Đăng xuất"
-            aria-label="Đăng xuất"
-            style={{
-              background: 'transparent',
-              border: 'none',
-              color: 'var(--text-muted)',
-              fontSize: '1rem',
-              cursor: 'pointer',
-              padding: '6px'
-            }}
-          >
-            🚪
-          </button>
         </div>
       </aside>
 
@@ -680,7 +705,7 @@ export default function ChatWorkspacePage() {
             </div>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <div style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -695,6 +720,26 @@ export default function ChatWorkspacePage() {
               <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#10b981' }} />
               <span>AI-Chan Online (SSE Active)</span>
             </div>
+
+            <Link
+              href="/settings"
+              title="Cài đặt tài khoản"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '6px 12px',
+                borderRadius: 'var(--radius-sm)',
+                background: 'rgba(255, 255, 255, 0.06)',
+                border: '1px solid var(--border-subtle)',
+                fontSize: '0.8rem',
+                color: 'var(--text-primary)',
+                textDecoration: 'none',
+                fontWeight: 500
+              }}
+            >
+              <span>⚙️ Cài đặt</span>
+            </Link>
           </div>
         </header>
 

@@ -58,7 +58,15 @@ async def register(req: RegisterRequest):
 @auth_router.post("/login")
 async def login(req: LoginRequest, response: Response):
     email_clean = req.email.lower().strip()
-    user = query_one("SELECT id, email, full_name, hashed_password, status, created_at FROM users WHERE email = ?", (email_clean,))
+    user = query_one(
+        """
+        SELECT id, email, full_name, username, avatar_url, bio, phone_number,
+               theme_preference, language_preference, status, created_at,
+               last_login_at, hashed_password
+        FROM users WHERE email = ?
+        """,
+        (email_clean,)
+    )
     
     if not user or not verify_password(req.password, user["hashed_password"]):
         raise HTTPException(
@@ -71,6 +79,12 @@ async def login(req: LoginRequest, response: Response):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Tài khoản hiện đang bị tạm khóa."
         )
+
+    # Cập nhật thời điểm đăng nhập gần nhất (PROC-002, FR-015)
+    execute_commit(
+        "UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (user["id"],)
+    )
 
     token = create_access_token(user_id=user["id"], email=user["email"])
 
@@ -91,8 +105,15 @@ async def login(req: LoginRequest, response: Response):
             "id": user["id"],
             "email": user["email"],
             "full_name": user["full_name"],
+            "username": user["username"],
+            "avatar_url": user["avatar_url"],
+            "bio": user["bio"],
+            "phone_number": user["phone_number"],
+            "theme_preference": user["theme_preference"] or "DARK",
+            "language_preference": user["language_preference"] or "vi",
             "status": user["status"],
-            "created_at": user["created_at"]
+            "created_at": user["created_at"],
+            "last_login_at": user["last_login_at"]
         },
         "token": token
     }

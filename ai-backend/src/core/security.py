@@ -87,7 +87,15 @@ async def get_current_user(request: Request) -> Dict:
         )
 
     user_id = payload["sub"]
-    user = query_one("SELECT id, email, full_name, status, created_at FROM users WHERE id = ?", (user_id,))
+    user = query_one(
+        """
+        SELECT id, email, full_name, username, avatar_url, bio, phone_number,
+               theme_preference, language_preference, status, created_at,
+               last_login_at, password_changed_at
+        FROM users WHERE id = ?
+        """,
+        (user_id,)
+    )
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

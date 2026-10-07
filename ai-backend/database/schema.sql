@@ -18,13 +18,24 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(255) NOT NULL UNIQUE COLLATE NOCASE,
     full_name VARCHAR(255),
     hashed_password VARCHAR(255) NOT NULL,
-    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DISABLED')),
+    username VARCHAR(50) UNIQUE COLLATE NOCASE,
+    avatar_url VARCHAR(500),
+    bio VARCHAR(500),
+    phone_number VARCHAR(20),
+    theme_preference VARCHAR(10) NOT NULL DEFAULT 'DARK' CHECK (theme_preference IN ('DARK', 'LIGHT', 'SYSTEM')),
+    language_preference VARCHAR(10) NOT NULL DEFAULT 'vi' CHECK (language_preference IN ('vi', 'en')),
+    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED')),
+    last_login_at TIMESTAMP,
+    password_changed_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Chỉ mục tối ưu hóa tìm kiếm người dùng theo Email khi đăng nhập (PROC-002, SEQ-002)
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+-- Chỉ mục tối ưu hóa tìm kiếm theo Tên đăng nhập Username (PROC-011, BR-007)
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 
 -- Trigger tự động cập nhật updated_at cho users khi có thay đổi bản ghi
 CREATE TRIGGER IF NOT EXISTS trg_users_updated_at

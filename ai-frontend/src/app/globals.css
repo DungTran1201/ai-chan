@@ -167,3 +167,23 @@ html, body {
   color: #e6edf3;
   line-height: 1.5;
 }
+
+/* Light Theme Variables */
+[data-theme='light'] {
+  --bg-primary: #f8fafc;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f1f5f9;
+  --bg-card: rgba(255, 255, 255, 0.95);
+  --bg-hover: rgba(0, 0, 0, 0.05);
+  --bg-active: rgba(99, 102, 241, 0.12);
+  --border-subtle: rgba(0, 0, 0, 0.1);
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+}
+
+[data-theme='light'] body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
+
