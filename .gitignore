@@ -18,6 +18,12 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .gemini/
+node_modules/
+.next/
+dist/
+build/
+venv/
+.venv/
 
 # IDE & Editor Settings
 .vscode/
