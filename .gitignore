@@ -26,6 +26,9 @@ dist/
 build/
 venv/
 .venv/
+*.db
+*.sqlite
+*.sqlite3
 
 # IDE & Editor Settings
 .vscode/
