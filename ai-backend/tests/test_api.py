@@ -36,5 +36,15 @@ class TestBackendAPI(unittest.TestCase):
         self.assertEqual(data["provider"], "gemini")
         self.assertGreater(data["tokens_used"], 0)
 
+    def test_rate_limiter_blocks_excessive_requests(self):
+        from src.core.security import InMemoryRateLimiter
+        from fastapi import HTTPException
+        test_limiter = InMemoryRateLimiter(requests_per_minute=2)
+        test_limiter.check("1.2.3.4")
+        test_limiter.check("1.2.3.4")
+        with self.assertRaises(HTTPException) as cm:
+            test_limiter.check("1.2.3.4")
+        self.assertEqual(cm.exception.status_code, 429)
+
 if __name__ == "__main__":
     unittest.main()
