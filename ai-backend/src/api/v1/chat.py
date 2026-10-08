@@ -13,7 +13,7 @@ chat_router = APIRouter(tags=["Chat Streaming"])
 
 class MessageStreamRequest(BaseModel):
     content: str = Field(min_length=1, max_length=4000, description="Nội dung prompt câu hỏi (tối đa 4000 ký tự)")
-    model: Optional[str] = "gemini-2.5-flash"
+    model: Optional[str] = "gemini-3.8-flash"
 
 async def generate_mock_ai_stream(prompt: str, history: list) -> AsyncGenerator[str, None]:
     """Fallback high-quality AI streaming generator when external cloud keys are absent."""
@@ -129,44 +129,31 @@ async def stream_message_endpoint(
     )
     context_msgs.reverse()
 
-    # 6. Generator truyền luồng Server-Sent Events (SSE)
+    # 6. Generator truyền luồng Server-Sent Events (SSE) qua LangChain & LangGraph Agent (ADR-005)
     async def sse_event_generator():
         assistant_msg_id = str(uuid.uuid4())
         accumulated_response = []
-        model_name = req.model or "gemini-2.5-flash"
+        final_model_used = req.model or "gemini-1.5-flash"
 
         try:
-            # Kiểm tra xem có cấu hình API Key thực hay không
-            gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
-            openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+            from llm.agent import chat_agent
 
-            if gemini_key or openai_key:
-                from llm.client import llm_manager
-                result = await llm_manager.generate_response(
-                    prompt=prompt_text,
-                    provider_name="gemini" if gemini_key else "openai",
-                    model_name=model_name
-                )
-                text = result.get("text", "")
-                words = text.split(" ")
-                for idx, w in enumerate(words):
-                    chunk_word = w + (" " if idx < len(words) - 1 else "")
-                    accumulated_response.append(chunk_word)
-                    data_payload = json.dumps({"token": chunk_word, "status": "streaming"}, ensure_ascii=False)
+            async for event in chat_agent.astream_agent(
+                prompt=prompt_text,
+                history=context_msgs,
+                model_override=req.model
+            ):
+                if event.get("status") == "streaming":
+                    token_str = event.get("token", "")
+                    accumulated_response.append(token_str)
+                    data_payload = json.dumps({"token": token_str, "status": "streaming"}, ensure_ascii=False)
                     yield f"event: chunk\ndata: {data_payload}\n\n"
-                    await asyncio.sleep(0.02)
-                model_name = result.get("model", model_name)
-            else:
-                async for chunk_event in generate_mock_ai_stream(prompt_text, context_msgs):
-                    # Trích xuất token để lưu trữ
-                    if chunk_event.startswith("event: chunk\ndata: "):
-                        raw_json = chunk_event.replace("event: chunk\ndata: ", "").strip()
-                        try:
-                            t = json.loads(raw_json).get("token", "")
-                            accumulated_response.append(t)
-                        except Exception:
-                            pass
-                    yield chunk_event
+                elif event.get("status") == "done":
+                    final_model_used = event.get("model", final_model_used)
+                elif event.get("status") == "error":
+                    err_msg = event.get("message", "Lỗi sinh phản hồi")
+                    err_payload = json.dumps({"status": "error", "message": err_msg}, ensure_ascii=False)
+                    yield f"event: error\ndata: {err_payload}\n\n"
 
             # Lưu toàn bộ câu trả lời hoàn chỉnh vào CSDL
             final_text = "".join(accumulated_response).strip()
@@ -175,14 +162,14 @@ async def stream_message_endpoint(
                 INSERT INTO messages (id, conversation_id, role, content, model_used)
                 VALUES (?, ?, 'assistant', ?, ?)
                 """,
-                (assistant_msg_id, conversation_id, final_text, model_name)
+                (assistant_msg_id, conversation_id, final_text, final_model_used)
             )
 
-            # Gửi sự kiện done hoàn tất (SEQ-003)
+            # Gửi sự kiện done hoàn tất (SEQ-003, ADR-004)
             done_payload = json.dumps({
                 "status": "done",
                 "message_id": assistant_msg_id,
-                "model": model_name
+                "model": final_model_used
             }, ensure_ascii=False)
             yield f"event: done\ndata: {done_payload}\n\n"
 

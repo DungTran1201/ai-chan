@@ -1,10 +1,11 @@
 @echo off
+set "PATH=C:\Program Files\nodejs;C:\Program Files\Git\cmd;%PATH%"
 echo ========================================================
 echo   Starting AI-Chan Assistant Fullstack Demo
 echo ========================================================
 
 echo [1/2] Starting FastAPI Backend on http://127.0.0.1:8000 ...
-start "AI-Chan Backend (FastAPI)" cmd /k "cd ai-backend && (if exist .venv\Scripts\activate.bat call .venv\Scripts\activate.bat) && python -m uvicorn src.main:app --port 8000 --reload"
+start "AI-Chan Backend (FastAPI)" cmd /k "cd ai-backend && (if exist .venv\Scripts\python.exe (.\.venv\Scripts\python.exe -m uvicorn src.main:app --port 8000 --reload) else (python -m uvicorn src.main:app --port 8000 --reload))"
 
 timeout /t 3 /nobreak >nul
 
