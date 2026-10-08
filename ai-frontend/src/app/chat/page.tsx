@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { AgentModel } from '@/types';
 
 interface Conversation {
   id: string;
@@ -14,6 +15,7 @@ interface Message {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
+  model?: string;
   created_at?: string;
   isStreaming?: boolean;
 }
@@ -129,6 +131,11 @@ export default function ChatWorkspacePage() {
   const [deleteModalConv, setDeleteModalConv] = useState<Conversation | null>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
 
+  // Active Models & Model Selector state (FR-021, FR-026, ADR-003)
+  const [activeModels, setActiveModels] = useState<AgentModel[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState<string>('gemini-3.8-flash');
+  const [showModelDropdown, setShowModelDropdown] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatScrollContainerRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -152,6 +159,28 @@ export default function ChatWorkspacePage() {
     };
     fetchMe();
   }, [router]);
+
+  // Load Active Models for selector
+  useEffect(() => {
+    const fetchActiveModels = async () => {
+      try {
+        const res = await fetch('/api/v1/models?status=ACTIVE');
+        if (res.ok) {
+          const data: AgentModel[] = await res.json();
+          setActiveModels(data);
+          const defModel = data.find(m => m.is_default);
+          if (defModel) {
+            setSelectedModelId(defModel.id);
+          } else if (data.length > 0) {
+            setSelectedModelId(data[0].id);
+          }
+        }
+      } catch {
+        // Fallback to default
+      }
+    };
+    fetchActiveModels();
+  }, []);
 
   // 2. Tải danh sách cuộc trò chuyện
   const fetchConversations = async () => {
@@ -319,6 +348,7 @@ export default function ChatWorkspacePage() {
       id: assistantPlaceholderId,
       role: 'assistant',
       content: '',
+      model: selectedModelId,
       created_at: new Date().toISOString(),
       isStreaming: true
     };
@@ -338,7 +368,10 @@ export default function ChatWorkspacePage() {
       const response = await fetch(`/api/v1/conversations/${targetConvId}/messages/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: textToSend.trim() }),
+        body: JSON.stringify({
+          content: textToSend.trim(),
+          model: selectedModelId
+        }),
         signal: controller.signal
       });
 
@@ -380,6 +413,24 @@ export default function ChatWorkspacePage() {
                   // Skip parse errors
                 }
               }
+            } else if (line.includes('event: error')) {
+              const dataMatch = line.match(/data:\s*(.*)/);
+              if (dataMatch) {
+                try {
+                  const errorObj = JSON.parse(dataMatch[1]);
+                  const errorMessage = errorObj.message || 'Đã xảy ra lỗi trong quá trình xử lý phản hồi từ AI.';
+                  accumulatedText = `⚠️ **Lỗi:** ${errorMessage}`;
+                  setMessages(prev =>
+                    prev.map(m =>
+                      m.id === assistantPlaceholderId
+                        ? { ...m, content: accumulatedText }
+                        : m
+                    )
+                  );
+                } catch {
+                  // Skip parse errors
+                }
+              }
             } else if (line.includes('event: done')) {
               // Hoàn tất luồng
             }
@@ -403,7 +454,9 @@ export default function ChatWorkspacePage() {
       abortControllerRef.current = null;
       setMessages(prev =>
         prev.map(m =>
-          m.id === assistantPlaceholderId ? { ...m, isStreaming: false } : m
+          m.id === assistantPlaceholderId
+            ? { ...m, isStreaming: false, content: m.content || 'Không nhận được phản hồi từ mô hình. Vui lòng kiểm tra lại cấu hình hoặc thử lại.' }
+            : m
         )
       );
       fetchConversations();
@@ -706,6 +759,106 @@ export default function ChatWorkspacePage() {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {/* Model Selector Dropdown */}
+            <div style={{ position: 'relative' }}>
+              <button
+                type="button"
+                onClick={() => setShowModelDropdown(!showModelDropdown)}
+                title="Chọn mô hình AI phục vụ hội thoại"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '5px 12px',
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'rgba(99, 102, 241, 0.12)',
+                  border: '1px solid rgba(99, 102, 241, 0.35)',
+                  fontSize: '0.78rem',
+                  color: '#c7d2fe',
+                  fontWeight: 600,
+                  cursor: 'pointer'
+                }}
+              >
+                <span>🤖</span>
+                <span>{activeModels.find(m => m.id === selectedModelId)?.name || selectedModelId || 'Mô hình AI'}</span>
+                <span style={{ fontSize: '0.65rem', marginLeft: '2px' }}>▼</span>
+              </button>
+
+              {showModelDropdown && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: '120%',
+                    right: 0,
+                    minWidth: '270px',
+                    background: 'rgba(15, 23, 42, 0.95)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 'var(--radius-md)',
+                    boxShadow: '0 12px 30px rgba(0, 0, 0, 0.5)',
+                    padding: '8px',
+                    zIndex: 100,
+                    backdropFilter: 'blur(16px)'
+                  }}
+                >
+                  <div style={{ padding: '6px 10px', fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    Chọn Mô Hình Hoạt Động ({activeModels.length})
+                  </div>
+
+                  {activeModels.map(am => (
+                    <div
+                      key={am.id}
+                      onClick={() => {
+                        setSelectedModelId(am.id);
+                        setShowModelDropdown(false);
+                      }}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '8px 10px',
+                        borderRadius: 'var(--radius-sm)',
+                        background: am.id === selectedModelId ? 'var(--bg-active)' : 'transparent',
+                        border: am.id === selectedModelId ? '1px solid rgba(99, 102, 241, 0.3)' : '1px solid transparent',
+                        cursor: 'pointer',
+                        marginBottom: '4px'
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontSize: '0.82rem', fontWeight: am.id === selectedModelId ? 700 : 500, color: '#fff' }}>
+                          {am.name}
+                        </div>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          {am.provider.toUpperCase()} • {am.is_default ? '⭐ Mặc định' : `${Math.round(am.context_window / 1000)}k ctx`}
+                        </div>
+                      </div>
+                      {am.id === selectedModelId && <span style={{ color: '#818cf8', fontSize: '0.85rem' }}>✓</span>}
+                    </div>
+                  ))}
+
+                  <div style={{ borderTop: '1px solid var(--border-subtle)', marginTop: '6px', paddingTop: '6px' }}>
+                    <Link
+                      href="/settings?tab=models"
+                      onClick={() => setShowModelDropdown(false)}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        padding: '6px 10px',
+                        borderRadius: 'var(--radius-sm)',
+                        color: '#38bdf8',
+                        fontSize: '0.78rem',
+                        fontWeight: 600,
+                        textDecoration: 'none'
+                      }}
+                    >
+                      <span>⚙️</span>
+                      <span>Quản lý & Kích hoạt Models</span>
+                    </Link>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -875,25 +1028,45 @@ export default function ChatWorkspacePage() {
                     </div>
 
                     {/* Bubble Content */}
-                    <div style={{
-                      padding: '14px 18px',
-                      borderRadius: 'var(--radius-md)',
-                      background: msg.role === 'user'
-                        ? 'linear-gradient(135deg, rgba(99,102,241,0.2) 0%, rgba(168,85,247,0.2) 100%)'
-                        : 'var(--bg-secondary)',
-                      border: msg.role === 'user'
-                        ? '1px solid rgba(99,102,241,0.4)'
-                        : '1px solid var(--border-subtle)',
-                      boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
-                      wordBreak: 'break-word'
-                    }}>
-                      {msg.role === 'user' ? (
-                        <p style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5, margin: 0, fontSize: '0.95rem' }}>
-                          {msg.content}
-                        </p>
-                      ) : (
-                        <FormattedMessage content={msg.content} isStreaming={msg.isStreaming} />
+                    <div>
+                      {msg.role === 'assistant' && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                          <span style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>AI-Chan</span>
+                          {msg.model && (
+                            <span style={{
+                              padding: '1px 6px',
+                              borderRadius: 'var(--radius-full)',
+                              background: 'rgba(99, 102, 241, 0.12)',
+                              border: '1px solid rgba(99, 102, 241, 0.25)',
+                              color: '#a5b4fc',
+                              fontSize: '0.68rem',
+                              fontFamily: 'var(--font-mono)'
+                            }}>
+                              {msg.model}
+                            </span>
+                          )}
+                        </div>
                       )}
+                      <div style={{
+                        padding: '14px 18px',
+                        borderRadius: 'var(--radius-md)',
+                        background: msg.role === 'user'
+                          ? 'linear-gradient(135deg, rgba(99,102,241,0.2) 0%, rgba(168,85,247,0.2) 100%)'
+                          : 'var(--bg-secondary)',
+                        border: msg.role === 'user'
+                          ? '1px solid rgba(99,102,241,0.4)'
+                          : '1px solid var(--border-subtle)',
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+                        wordBreak: 'break-word'
+                      }}>
+                        {msg.role === 'user' ? (
+                          <p style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5, margin: 0, fontSize: '0.95rem' }}>
+                            {msg.content}
+                          </p>
+                        ) : (
+                          <FormattedMessage content={msg.content} isStreaming={msg.isStreaming} />
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>

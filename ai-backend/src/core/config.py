@@ -2,6 +2,10 @@ import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
+from pathlib import Path
+_backend_dir = Path(__file__).resolve().parent.parent.parent
+_env_path = str(_backend_dir / ".env") if (_backend_dir / ".env").exists() else ".env"
+
 class Settings(BaseSettings):
     APP_ENV: str = "development"
     APP_NAME: str = "ai-chan-backend"
@@ -26,7 +30,7 @@ class Settings(BaseSettings):
     DEFAULT_LLM_MODEL: str = "gemini-1.5-flash"
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_env_path,
         env_file_encoding="utf-8",
         extra="ignore"
     )

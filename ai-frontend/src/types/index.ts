@@ -24,3 +24,20 @@ export interface LLMProviderOption {
   provider: 'openai' | 'gemini' | 'anthropic' | 'ollama';
   modelId: string;
 }
+
+export interface AgentModel {
+  id: string;
+  name: string;
+  provider: 'google' | 'anthropic' | 'openai' | 'groq' | 'ollama';
+  status: 'ACTIVE' | 'INACTIVE' | 'DEGRADED';
+  is_default: boolean;
+  context_window: number;
+  max_tokens: number;
+  supports_streaming: boolean;
+  has_api_key: boolean;
+  latency_ms: number | null;
+  last_checked_at: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+

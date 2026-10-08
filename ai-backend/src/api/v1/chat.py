@@ -133,7 +133,12 @@ async def stream_message_endpoint(
     async def sse_event_generator():
         assistant_msg_id = str(uuid.uuid4())
         accumulated_response = []
-        final_model_used = req.model or "gemini-1.5-flash"
+        # Tra cứu mô hình mặc định từ bảng models nếu không chỉ định cụ thể
+        selected_model = req.model
+        if not selected_model:
+            def_model_row = query_one("SELECT id FROM models WHERE is_default = 1 AND status = 'ACTIVE' LIMIT 1")
+            selected_model = def_model_row["id"] if def_model_row else "gemini-3.8-flash"
+        final_model_used = selected_model
 
         try:
             from llm.agent import chat_agent
@@ -141,7 +146,7 @@ async def stream_message_endpoint(
             async for event in chat_agent.astream_agent(
                 prompt=prompt_text,
                 history=context_msgs,
-                model_override=req.model
+                model_override=selected_model
             ):
                 if event.get("status") == "streaming":
                     token_str = event.get("token", "")

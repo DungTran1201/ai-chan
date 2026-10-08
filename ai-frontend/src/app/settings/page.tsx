@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { AgentModel } from '@/types';
 
 interface UserProfile {
   id: string;
@@ -27,8 +28,8 @@ interface UserStats {
 export default function SettingsPage() {
   const router = useRouter();
 
-  // Active tab state: 'profile' | 'security' | 'preferences'
-  const [activeTab, setActiveTab] = useState<'profile' | 'security' | 'preferences'>('profile');
+  // Active tab state: 'profile' | 'security' | 'preferences' | 'models'
+  const [activeTab, setActiveTab] = useState<'profile' | 'security' | 'preferences' | 'models'>('profile');
 
   // User data
   const [user, setUser] = useState<UserProfile | null>(null);
@@ -63,6 +64,15 @@ export default function SettingsPage() {
   const [themePreference, setThemePreference] = useState<'DARK' | 'LIGHT' | 'SYSTEM'>('DARK');
   const [languagePreference, setLanguagePreference] = useState<'vi' | 'en'>('vi');
   const [savingPreferences, setSavingPreferences] = useState(false);
+
+  // Tab 4: Models state (FR-021 to FR-026, BR-012 to BR-015)
+  const [models, setModels] = useState<AgentModel[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelFilterStatus, setModelFilterStatus] = useState<'ALL' | 'ACTIVE' | 'INACTIVE'>('ALL');
+  const [modelFilterProvider, setModelFilterProvider] = useState<string>('ALL');
+  const [testingModelId, setTestingModelId] = useState<string | null>(null);
+  const [togglingModelId, setTogglingModelId] = useState<string | null>(null);
+  const [settingDefaultId, setSettingDefaultId] = useState<string | null>(null);
 
   const showToast = (type: 'success' | 'error', message: string) => {
     setToast({ type, message });
@@ -106,6 +116,229 @@ export default function SettingsPage() {
 
     fetchProfile();
   }, [router]);
+
+  // Read URL query parameter ?tab=models on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get('tab');
+      if (tabParam === 'models' || tabParam === 'security' || tabParam === 'preferences' || tabParam === 'profile') {
+        setActiveTab(tabParam as any);
+      }
+    }
+  }, []);
+
+  const fetchModels = async () => {
+    try {
+      setLoadingModels(true);
+      const res = await fetch('/api/v1/models?status=ALL');
+      if (!res.ok) {
+        throw new Error('Không thể tải danh sách mô hình từ máy chủ.');
+      }
+      const data: AgentModel[] = await res.json();
+      setModels(data);
+    } catch (err: any) {
+      showToast('error', err.message || 'Lỗi khi tải danh sách mô hình.');
+    } finally {
+      setLoadingModels(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'models') {
+      fetchModels();
+    }
+  }, [activeTab]);
+
+  const handleTestConnection = async (model: AgentModel) => {
+    setTestingModelId(model.id);
+    try {
+      const res = await fetch(`/api/v1/models/${model.id}/test`, {
+        method: 'POST'
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || 'Kiểm tra kết nối thất bại.');
+      }
+      setModels(prev =>
+        prev.map(m => (m.id === model.id ? { ...m, latency_ms: data.latency_ms, last_checked_at: data.tested_at } : m))
+      );
+      showToast('success', `⚡ ${data.message} (Độ trễ Round-Trip: ${data.latency_ms} ms)`);
+    } catch (err: any) {
+      showToast('error', err.message || 'Lỗi kiểm tra kết nối.');
+    } finally {
+      setTestingModelId(null);
+    }
+  };
+
+  const handleActivateModel = async (model: AgentModel) => {
+    setTogglingModelId(model.id);
+    try {
+      const res = await fetch(`/api/v1/models/${model.id}/activate`, {
+        method: 'PATCH'
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || 'Không thể kích hoạt mô hình.');
+      }
+      setModels(prev =>
+        prev.map(m => (m.id === model.id ? { ...m, status: 'ACTIVE' } : m))
+      );
+      showToast('success', data.message || `Đã kích hoạt ${model.name}.`);
+    } catch (err: any) {
+      showToast('error', err.message || 'Lỗi khi kích hoạt mô hình.');
+    } finally {
+      setTogglingModelId(null);
+    }
+  };
+
+  const handleDeactivateModel = async (model: AgentModel) => {
+    if (model.is_default) {
+      showToast('error', `Không thể hủy kích hoạt '${model.name}' vì đang là mô hình mặc định của hệ thống (BR-013). Hãy chọn mô hình khác làm mặc định trước.`);
+      return;
+    }
+    setTogglingModelId(model.id);
+    try {
+      const res = await fetch(`/api/v1/models/${model.id}/deactivate`, {
+        method: 'PATCH'
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || 'Không thể hủy kích hoạt mô hình.');
+      }
+      setModels(prev =>
+        prev.map(m => (m.id === model.id ? { ...m, status: 'INACTIVE' } : m))
+      );
+      showToast('success', `${data.message} (Đã chuyển sang INACTIVE, không xóa dữ liệu - BR-012)`);
+    } catch (err: any) {
+      showToast('error', err.message || 'Lỗi khi hủy kích hoạt mô hình.');
+    } finally {
+      setTogglingModelId(null);
+    }
+  };
+
+  const handleSetDefaultModel = async (model: AgentModel) => {
+    if (model.status !== 'ACTIVE') {
+      showToast('error', `Chỉ có thể đặt mô hình đang ở trạng thái ACTIVE làm mặc định (BR-013). Hãy kích hoạt mô hình trước.`);
+      return;
+    }
+    setSettingDefaultId(model.id);
+    try {
+      const res = await fetch('/api/v1/models/default', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: model.id })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || 'Không thể thiết lập mô hình mặc định.');
+      }
+      setModels(prev =>
+        prev.map(m => ({ ...m, is_default: m.id === model.id }))
+      );
+      showToast('success', data.message || `Đã đặt '${model.name}' làm mô hình mặc định thành công.`);
+    } catch (err: any) {
+      showToast('error', err.message || 'Lỗi khi thiết lập mô hình mặc định.');
+    } finally {
+      setSettingDefaultId(null);
+    }
+  };
+
+  const getProviderMeta = (provider: string) => {
+    switch (provider.toLowerCase()) {
+      case 'google':
+        return {
+          label: 'Google Gemini',
+          icon: '✨',
+          gradient: 'linear-gradient(135deg, rgba(66, 133, 244, 0.15), rgba(168, 85, 247, 0.15))',
+          border: 'rgba(66, 133, 244, 0.35)',
+          textColor: '#60a5fa',
+          badgeBg: 'rgba(59, 130, 246, 0.15)'
+        };
+      case 'openai':
+        return {
+          label: 'OpenAI',
+          icon: '🟢',
+          gradient: 'linear-gradient(135deg, rgba(16, 185, 129, 0.15), rgba(20, 184, 166, 0.15))',
+          border: 'rgba(16, 185, 129, 0.35)',
+          textColor: '#34d399',
+          badgeBg: 'rgba(16, 185, 129, 0.15)'
+        };
+      case 'anthropic':
+        return {
+          label: 'Anthropic Claude',
+          icon: '🪸',
+          gradient: 'linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(239, 68, 68, 0.15))',
+          border: 'rgba(245, 158, 11, 0.35)',
+          textColor: '#fbbf24',
+          badgeBg: 'rgba(245, 158, 11, 0.15)'
+        };
+      case 'groq':
+        return {
+          label: 'Groq LPU',
+          icon: '⚡',
+          gradient: 'linear-gradient(135deg, rgba(249, 115, 22, 0.15), rgba(234, 88, 12, 0.15))',
+          border: 'rgba(249, 115, 22, 0.35)',
+          textColor: '#fb923c',
+          badgeBg: 'rgba(249, 115, 22, 0.15)'
+        };
+      case 'ollama':
+        return {
+          label: 'Ollama Local',
+          icon: '🦙',
+          gradient: 'linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(99, 102, 241, 0.15))',
+          border: 'rgba(139, 92, 246, 0.35)',
+          textColor: '#a78bfa',
+          badgeBg: 'rgba(139, 92, 246, 0.15)'
+        };
+      default:
+        return {
+          label: provider.toUpperCase(),
+          icon: '🤖',
+          gradient: 'linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.04))',
+          border: 'var(--border-subtle)',
+          textColor: 'var(--text-secondary)',
+          badgeBg: 'rgba(255, 255, 255, 0.1)'
+        };
+    }
+  };
+
+  const getStatusMeta = (status: string) => {
+    switch (status) {
+      case 'ACTIVE':
+        return {
+          label: 'Hoạt động',
+          badgeBg: 'rgba(16, 185, 129, 0.15)',
+          badgeBorder: 'rgba(16, 185, 129, 0.4)',
+          textColor: '#34d399',
+          dotColor: '#10b981'
+        };
+      case 'INACTIVE':
+        return {
+          label: 'Đã tạm dừng',
+          badgeBg: 'rgba(148, 163, 184, 0.1)',
+          badgeBorder: 'rgba(148, 163, 184, 0.25)',
+          textColor: '#94a3b8',
+          dotColor: '#64748b'
+        };
+      case 'DEGRADED':
+        return {
+          label: 'Hiệu năng giảm',
+          badgeBg: 'rgba(245, 158, 11, 0.15)',
+          badgeBorder: 'rgba(245, 158, 11, 0.4)',
+          textColor: '#fbbf24',
+          dotColor: '#f59e0b'
+        };
+      default:
+        return {
+          label: status,
+          badgeBg: 'rgba(255, 255, 255, 0.1)',
+          badgeBorder: 'var(--border-subtle)',
+          textColor: 'var(--text-secondary)',
+          dotColor: '#94a3b8'
+        };
+    }
+  };
 
   const applyTheme = (theme: 'DARK' | 'LIGHT' | 'SYSTEM') => {
     if (typeof document !== 'undefined') {
@@ -540,6 +773,27 @@ export default function SettingsPage() {
             }}
           >
             ⚙️ Tùy chọn giao diện
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('models')}
+            style={{
+              padding: '10px 18px',
+              borderRadius: 'var(--radius-sm) var(--radius-sm) 0 0',
+              background: activeTab === 'models' ? 'var(--bg-active)' : 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'models' ? '2px solid var(--accent-primary)' : '2px solid transparent',
+              color: activeTab === 'models' ? '#fff' : 'var(--text-secondary)',
+              fontWeight: activeTab === 'models' ? 600 : 500,
+              fontSize: '0.92rem',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+          >
+            🤖 Quản lý Models & Agents
           </button>
         </div>
 
@@ -1063,6 +1317,425 @@ export default function SettingsPage() {
                 <option value="vi" style={{ background: '#111827', color: '#fff' }}>🇻🇳 Tiếng Việt</option>
                 <option value="en" style={{ background: '#111827', color: '#fff' }}>🇬🇧 English</option>
               </select>
+            </div>
+          </div>
+        )}
+
+        {/* ============================================================ */}
+        {/* TAB 4: QUẢN LÝ MODELS & AGENTS (FR-021 TO FR-026, BR-012)    */}
+        {/* ============================================================ */}
+        {activeTab === 'models' && (
+          <div style={{
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 'var(--radius-lg)',
+            padding: '2rem',
+            backdropFilter: 'blur(16px)'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '1rem' }}>
+              <div>
+                <h2 style={{ fontSize: '1.25rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  🤖 Danh Mục Mô Hình & AI Agents
+                </h2>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginTop: '4px' }}>
+                  Quản lý trạng thái Soft-Toggle, đo lường độ trễ mạng và thiết lập mô hình mặc định từ các nhà cung cấp bên ngoài.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={fetchModels}
+                disabled={loadingModels}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '8px 16px',
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'rgba(255, 255, 255, 0.06)',
+                  border: '1px solid var(--border-subtle)',
+                  color: '#fff',
+                  fontSize: '0.85rem',
+                  fontWeight: 600,
+                  cursor: loadingModels ? 'not-allowed' : 'pointer'
+                }}
+              >
+                <span>{loadingModels ? '⏳' : '🔄'}</span>
+                <span>{loadingModels ? 'Đang tải...' : 'Làm mới'}</span>
+              </button>
+            </div>
+
+            {/* Quick Filter Toolbar */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '12px',
+              padding: '12px 16px',
+              borderRadius: 'var(--radius-md)',
+              background: 'rgba(0,0,0,0.2)',
+              border: '1px solid var(--border-subtle)',
+              marginBottom: '1.5rem'
+            }}>
+              {/* Status Filter Tabs */}
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {(['ALL', 'ACTIVE', 'INACTIVE'] as const).map(st => {
+                  const label = st === 'ALL' ? `Tất cả (${models.length})` : st === 'ACTIVE' ? `🟢 Hoạt động (${models.filter(m => m.status === 'ACTIVE').length})` : `⚪ Tạm dừng (${models.filter(m => m.status === 'INACTIVE').length})`;
+                  const isSelected = modelFilterStatus === st;
+                  return (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => setModelFilterStatus(st)}
+                      style={{
+                        padding: '6px 14px',
+                        borderRadius: 'var(--radius-full)',
+                        fontSize: '0.82rem',
+                        fontWeight: isSelected ? 600 : 500,
+                        background: isSelected ? 'var(--accent-primary)' : 'rgba(255,255,255,0.05)',
+                        border: isSelected ? '1px solid var(--accent-secondary)' : '1px solid transparent',
+                        color: isSelected ? '#fff' : 'var(--text-secondary)',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Provider Filter Select */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>Nhà cung cấp:</span>
+                <select
+                  value={modelFilterProvider}
+                  onChange={(e) => setModelFilterProvider(e.target.value)}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: 'var(--radius-sm)',
+                    background: 'rgba(0,0,0,0.35)',
+                    border: '1px solid var(--border-subtle)',
+                    color: '#fff',
+                    fontSize: '0.82rem',
+                    cursor: 'pointer'
+                  }}
+                >
+                  <option value="ALL" style={{ background: '#111827', color: '#fff' }}>Tất cả nhà cung cấp</option>
+                  <option value="google" style={{ background: '#111827', color: '#fff' }}>Google Gemini</option>
+                  <option value="openai" style={{ background: '#111827', color: '#fff' }}>OpenAI</option>
+                  <option value="anthropic" style={{ background: '#111827', color: '#fff' }}>Anthropic</option>
+                  <option value="groq" style={{ background: '#111827', color: '#fff' }}>Groq</option>
+                  <option value="ollama" style={{ background: '#111827', color: '#fff' }}>Ollama</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Models Cards Grid */}
+            {loadingModels && models.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                <div style={{ fontSize: '2rem', marginBottom: '8px' }}>⏳</div>
+                <div>Đang tải danh mục mô hình AI...</div>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '1.25rem', marginBottom: '2rem' }}>
+                {models
+                  .filter(m => {
+                    const passStatus = modelFilterStatus === 'ALL' || m.status === modelFilterStatus;
+                    const passProvider = modelFilterProvider === 'ALL' || m.provider.toLowerCase() === modelFilterProvider.toLowerCase();
+                    return passStatus && passProvider;
+                  })
+                  .map(m => {
+                    const pMeta = getProviderMeta(m.provider);
+                    const sMeta = getStatusMeta(m.status);
+                    const isTesting = testingModelId === m.id;
+                    const isToggling = togglingModelId === m.id;
+                    const isSettingDef = settingDefaultId === m.id;
+
+                    return (
+                      <div
+                        key={m.id}
+                        style={{
+                          borderRadius: 'var(--radius-md)',
+                          background: 'rgba(15, 23, 42, 0.65)',
+                          border: m.is_default ? '2px solid rgba(245, 158, 11, 0.6)' : `1px solid ${pMeta.border}`,
+                          boxShadow: m.is_default ? '0 0 20px rgba(245, 158, 11, 0.2)' : 'none',
+                          padding: '1.25rem',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          justifyContent: 'space-between',
+                          backdropFilter: 'blur(10px)',
+                          transition: 'transform 0.2s ease, border-color 0.2s ease'
+                        }}
+                      >
+                        {/* Top: Header with Provider, Name & Status */}
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                            {/* Provider pill */}
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              padding: '4px 10px',
+                              borderRadius: 'var(--radius-full)',
+                              background: pMeta.badgeBg,
+                              border: `1px solid ${pMeta.border}`,
+                              fontSize: '0.75rem',
+                              fontWeight: 600,
+                              color: pMeta.textColor
+                            }}>
+                              <span>{pMeta.icon}</span>
+                              <span>{pMeta.label}</span>
+                            </span>
+
+                            {/* Status & Default Badges */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              {m.is_default && (
+                                <span style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  padding: '3px 8px',
+                                  borderRadius: 'var(--radius-full)',
+                                  background: 'rgba(245, 158, 11, 0.2)',
+                                  border: '1px solid rgba(245, 158, 11, 0.5)',
+                                  color: '#fbbf24',
+                                  fontSize: '0.72rem',
+                                  fontWeight: 700
+                                }}>
+                                  ⭐ Mặc định
+                                </span>
+                              )}
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '5px',
+                                padding: '3px 8px',
+                                borderRadius: 'var(--radius-full)',
+                                background: sMeta.badgeBg,
+                                border: `1px solid ${sMeta.badgeBorder}`,
+                                color: sMeta.textColor,
+                                fontSize: '0.72rem',
+                                fontWeight: 600
+                              }}>
+                                <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: sMeta.dotColor }} />
+                                <span>{sMeta.label}</span>
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Model Title & ID */}
+                          <div style={{ marginBottom: '12px' }}>
+                            <h3 style={{ fontSize: '1.05rem', fontWeight: 700, color: '#f8fafc', marginBottom: '2px' }}>
+                              {m.name}
+                            </h3>
+                            <div style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                              ID: {m.id}
+                            </div>
+                          </div>
+
+                          {/* Key Presence Indicator */}
+                          <div style={{
+                            padding: '6px 10px',
+                            borderRadius: 'var(--radius-sm)',
+                            background: m.has_api_key ? 'rgba(16, 185, 129, 0.08)' : 'rgba(245, 158, 11, 0.08)',
+                            border: `1px solid ${m.has_api_key ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)'}`,
+                            fontSize: '0.75rem',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            marginBottom: '12px'
+                          }}>
+                            <span style={{ color: m.has_api_key ? '#34d399' : '#fbbf24', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span>{m.has_api_key ? '🔑' : '⚠️'}</span>
+                              <span>{m.has_api_key ? 'API Key đã cấu hình trong .env' : 'Chưa cấu hình API Key trong .env'}</span>
+                            </span>
+                            {m.latency_ms ? (
+                              <span style={{ color: '#38bdf8', fontWeight: 600 }}>
+                                ⚡ {m.latency_ms} ms
+                              </span>
+                            ) : null}
+                          </div>
+
+                          {/* Technical Specs 2x2 Grid */}
+                          <div style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(2, 1fr)',
+                            gap: '8px',
+                            background: 'rgba(0,0,0,0.2)',
+                            borderRadius: 'var(--radius-sm)',
+                            padding: '10px',
+                            marginBottom: '14px',
+                            fontSize: '0.78rem'
+                          }}>
+                            <div>
+                              <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.72rem' }}>Ngữ cảnh tối đa</span>
+                              <span style={{ fontWeight: 600, color: '#e2e8f0' }}>{m.context_window.toLocaleString()} tokens</span>
+                            </div>
+                            <div>
+                              <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.72rem' }}>Phản hồi tối đa</span>
+                              <span style={{ fontWeight: 600, color: '#e2e8f0' }}>{m.max_tokens.toLocaleString()} tokens</span>
+                            </div>
+                            <div>
+                              <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.72rem' }}>Streaming SSE</span>
+                              <span style={{ fontWeight: 600, color: m.supports_streaming ? '#34d399' : '#94a3b8' }}>
+                                {m.supports_streaming ? '✓ Hỗ trợ' : '✗ Không'}
+                              </span>
+                            </div>
+                            <div>
+                              <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.72rem' }}>Kiểm tra gần nhất</span>
+                              <span style={{ fontWeight: 500, color: '#94a3b8' }}>
+                                {m.last_checked_at ? new Date(m.last_checked_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'Chưa đo'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Actions Footer Toolbar */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            {/* Ping / Test Button */}
+                            <button
+                              type="button"
+                              onClick={() => handleTestConnection(m)}
+                              disabled={isTesting}
+                              title="Kiểm tra kết nối và đo độ trễ tới API nhà cung cấp"
+                              style={{
+                                flex: 1,
+                                padding: '8px 10px',
+                                borderRadius: 'var(--radius-sm)',
+                                background: 'rgba(56, 189, 248, 0.1)',
+                                border: '1px solid rgba(56, 189, 248, 0.3)',
+                                color: '#38bdf8',
+                                fontSize: '0.8rem',
+                                fontWeight: 600,
+                                cursor: isTesting ? 'wait' : 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '6px'
+                              }}
+                            >
+                              <span>{isTesting ? '⏳' : '⚡'}</span>
+                              <span>{isTesting ? 'Đang ping...' : 'Ping test'}</span>
+                            </button>
+
+                            {/* Soft Toggle Button (Activate or Deactivate - BR-012) */}
+                            {m.status === 'ACTIVE' ? (
+                              <button
+                                type="button"
+                                onClick={() => handleDeactivateModel(m)}
+                                disabled={isToggling || m.is_default}
+                                title={m.is_default ? 'Không thể tạm dừng mô hình đang làm mặc định (BR-013)' : 'Tạm dừng mô hình (Soft toggle - BR-012)'}
+                                style={{
+                                  flex: 1,
+                                  padding: '8px 10px',
+                                  borderRadius: 'var(--radius-sm)',
+                                  background: m.is_default ? 'rgba(255,255,255,0.04)' : 'rgba(239, 68, 68, 0.1)',
+                                  border: m.is_default ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(239, 68, 68, 0.3)',
+                                  color: m.is_default ? 'var(--text-muted)' : '#f87171',
+                                  fontSize: '0.8rem',
+                                  fontWeight: 600,
+                                  cursor: (isToggling || m.is_default) ? 'not-allowed' : 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: '6px'
+                                }}
+                              >
+                                <span>{isToggling ? '⏳' : '⏸️'}</span>
+                                <span>{isToggling ? 'Đang xử lý...' : 'Tạm dừng'}</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleActivateModel(m)}
+                                disabled={isToggling}
+                                title="Kích hoạt mô hình đưa vào giao diện chat"
+                                style={{
+                                  flex: 1,
+                                  padding: '8px 10px',
+                                  borderRadius: 'var(--radius-sm)',
+                                  background: 'rgba(16, 185, 129, 0.12)',
+                                  border: '1px solid rgba(16, 185, 129, 0.35)',
+                                  color: '#34d399',
+                                  fontSize: '0.8rem',
+                                  fontWeight: 600,
+                                  cursor: isToggling ? 'wait' : 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: '6px'
+                                }}
+                              >
+                                <span>{isToggling ? '⏳' : '▶️'}</span>
+                                <span>{isToggling ? 'Đang xử lý...' : 'Kích hoạt'}</span>
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Set As Default Button */}
+                          {!m.is_default && (
+                            <button
+                              type="button"
+                              onClick={() => handleSetDefaultModel(m)}
+                              disabled={isSettingDef || m.status !== 'ACTIVE'}
+                              title={m.status !== 'ACTIVE' ? 'Chỉ có thể đặt mô hình đang ACTIVE làm mặc định' : 'Thiết lập làm mô hình mặc định cho các phiên chat mới'}
+                              style={{
+                                width: '100%',
+                                padding: '6px 12px',
+                                borderRadius: 'var(--radius-sm)',
+                                background: m.status === 'ACTIVE' ? 'rgba(245, 158, 11, 0.1)' : 'rgba(255,255,255,0.03)',
+                                border: m.status === 'ACTIVE' ? '1px solid rgba(245, 158, 11, 0.3)' : '1px solid var(--border-subtle)',
+                                color: m.status === 'ACTIVE' ? '#fbbf24' : 'var(--text-muted)',
+                                fontSize: '0.78rem',
+                                fontWeight: 600,
+                                cursor: (isSettingDef || m.status !== 'ACTIVE') ? 'not-allowed' : 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '6px'
+                              }}
+                            >
+                              <span>⭐</span>
+                              <span>{isSettingDef ? 'Đang thiết lập...' : 'Đặt làm mô hình mặc định'}</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+
+            {/* Invariant Policy Callout Box (BR-012, BR-013, BR-014, BR-015) */}
+            <div style={{
+              background: 'rgba(30, 41, 59, 0.5)',
+              border: '1px solid rgba(99, 102, 241, 0.25)',
+              borderRadius: 'var(--radius-md)',
+              padding: '1.25rem',
+              fontSize: '0.82rem',
+              lineHeight: 1.6
+            }}>
+              <div style={{ fontWeight: 700, color: '#e2e8f0', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span>🛡️</span>
+                <span>Quy Tắc Vận Hành & Bảo Vệ Toàn Vẹn Dữ Liệu (Data & Model Invariants)</span>
+              </div>
+              <ul style={{ listStyleType: 'disc', paddingLeft: '1.25rem', color: 'var(--text-secondary)' }}>
+                <li>
+                  <strong style={{ color: '#fff' }}>BR-012 (Không xóa cứng):</strong> Hệ thống tuyệt đối không cung cấp thao tác xóa vật lý (Hard Delete) mô hình khỏi CSDL để bảo toàn tính toàn vẹn của lịch sử đàm thoại và số liệu token. Thay vào đó, áp dụng cơ chế <em>Soft Toggle</em> (Kích hoạt ↔ Tạm dừng).
+                </li>
+                <li>
+                  <strong style={{ color: '#fff' }}>BR-013 (Bảo toàn mô hình mặc định):</strong> Hệ thống luôn duy trì ít nhất 1 mô hình ở trạng thái <code>ACTIVE</code> làm mặc định. Bạn không thể hủy kích hoạt mô hình đang là mặc định trước khi chỉ định mô hình thay thế.
+                </li>
+                <li>
+                  <strong style={{ color: '#fff' }}>BR-014 (Kiểm tra khóa API):</strong> Việc kích hoạt mô hình đòi hỏi API Key tương ứng phải được cấu hình trong tệp <code>.env</code> tại backend.
+                </li>
+                <li>
+                  <strong style={{ color: '#fff' }}>FR-023 (Đo lường độ trễ):</strong> Nút <em>Ping test</em> kiểm tra kết nối trực tiếp Round-Trip tới API nhà cung cấp và tự động lưu độ trễ mới nhất vào cơ sở dữ liệu.
+                </li>
+              </ul>
             </div>
           </div>
         )}
