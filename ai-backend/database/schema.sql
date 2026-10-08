@@ -99,3 +99,57 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv_created_asc ON messages(conversatio
 
 -- Chỉ mục truy vấn trượt 20 tin nhắn gần nhất làm ngữ cảnh đưa vào LLM (INV-04, Sliding Context Window)
 CREATE INDEX IF NOT EXISTS idx_messages_conv_created_desc ON messages(conversation_id, created_at DESC);
+
+-- Chỉ mục lọc tin nhắn theo model_used để thống kê sử dụng theo mô hình
+CREATE INDEX IF NOT EXISTS idx_messages_model_used ON messages(model_used);
+
+
+-- ------------------------------------------------------------------------------
+-- 4. BẢNG MÔ HÌNH AGENT (MODELS)
+-- Quản lý danh mục mô hình LLM từ nhiều nhà cung cấp (Google, Anthropic, OpenAI, Groq, Ollama)
+-- Bounded Context: Model Catalog Context & Agent Orchestration (Aggregate Root)
+-- Invariants: Soft toggle trạng thái (BR-012), Tối thiểu 1 model ACTIVE là mặc định (BR-013),
+--             Kiểm tra kết nối và độ trễ Round-Trip (FR-023, BR-014, BR-015)
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS models (
+    id VARCHAR(100) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    provider VARCHAR(50) NOT NULL CHECK (provider IN ('google', 'anthropic', 'openai', 'groq', 'ollama')),
+    status VARCHAR(20) NOT NULL DEFAULT 'INACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'DEGRADED')),
+    is_default BOOLEAN NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+    context_window INTEGER NOT NULL DEFAULT 128000,
+    max_tokens INTEGER NOT NULL DEFAULT 4096,
+    supports_streaming BOOLEAN NOT NULL DEFAULT 1 CHECK (supports_streaming IN (0, 1)),
+    latency_ms INTEGER,
+    last_checked_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Chỉ mục lọc mô hình theo nhà cung cấp
+CREATE INDEX IF NOT EXISTS idx_models_provider ON models(provider);
+
+-- Chỉ mục lọc mô hình theo trạng thái hoạt động (ACTIVE, INACTIVE, DEGRADED)
+CREATE INDEX IF NOT EXISTS idx_models_status ON models(status);
+
+-- Chỉ mục lọc mô hình mặc định hệ thống
+CREATE INDEX IF NOT EXISTS idx_models_is_default ON models(is_default);
+
+-- Trigger tự động cập nhật updated_at cho models khi có cập nhật cấu hình hoặc trạng thái
+CREATE TRIGGER IF NOT EXISTS trg_models_updated_at
+AFTER UPDATE ON models
+FOR EACH ROW
+BEGIN
+    UPDATE models SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id;
+END;
+
+-- Dữ liệu khởi tạo (Seed data) cho các mô hình hệ thống mặc định
+INSERT OR IGNORE INTO models (id, name, provider, status, is_default, context_window, max_tokens, supports_streaming)
+VALUES
+    ('gemini-3.8-flash', 'Google Gemini 3.8 Flash', 'google', 'ACTIVE', 1, 1000000, 8192, 1),
+    ('gemini-3.5-flash', 'Google Gemini 3.5 Flash', 'google', 'ACTIVE', 0, 1000000, 8192, 1),
+    ('gpt-4o-mini', 'OpenAI GPT-4o Mini', 'openai', 'INACTIVE', 0, 128000, 4096, 1),
+    ('claude-3-7-sonnet', 'Anthropic Claude 3.7 Sonnet', 'anthropic', 'INACTIVE', 0, 200000, 8192, 1),
+    ('llama-3.3-70b-versatile', 'Groq Llama 3.3 70B', 'groq', 'INACTIVE', 0, 128000, 8192, 1),
+    ('llama3', 'Ollama Local Llama 3', 'ollama', 'INACTIVE', 0, 8192, 2048, 1);
+
