@@ -2,11 +2,14 @@ import uuid
 import json
 import asyncio
 import os
+import time
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, status, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, AsyncGenerator
 from src.core.security import get_current_user, app_rate_limiter
+from src.core.telemetry import quota_manager, metric_logger
 from src.db import query_one, query_all, execute_commit
 
 chat_router = APIRouter(tags=["Chat Streaming"])
@@ -75,6 +78,34 @@ async def stream_message_endpoint(
 
     user_id = current_user["id"]
     
+    # 0. Kiểm tra Hạn ngạch Quota Token hàng ngày (BR-020, CTRL-008, TC-025)
+    is_allowed, used_tokens, limit_tokens, is_warn_80 = quota_manager.check_quota(user_id, estimated_tokens=100)
+    if not is_allowed:
+        # Ghi nhận metric chặn quota 429
+        metric_logger.log_metric(
+            endpoint=f"/api/v1/conversations/{conversation_id}/messages/stream",
+            method="POST",
+            status_code=429,
+            latency_ms=1.0,
+            user_id=user_id,
+            error_code="DAILY_QUOTA_EXCEEDED"
+        )
+        now_dt = datetime.now(timezone.utc)
+        reset_dt = (now_dt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        retry_after_secs = int((reset_dt - now_dt).total_seconds())
+
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error_code": "DAILY_QUOTA_EXCEEDED",
+                "message": f"Hạn ngạch token trong ngày đã hết ({used_tokens:,}/{limit_tokens:,} tokens). Yêu cầu bị chặn (HTTP 429). Hạn ngạch sẽ được làm mới lúc 00:00 UTC.",
+                "daily_tokens_used": used_tokens,
+                "daily_token_limit": limit_tokens,
+                "retry_after": retry_after_secs
+            },
+            headers={"Retry-After": str(retry_after_secs)}
+        )
+
     # 1. Kiểm tra quyền sở hữu cuộc trò chuyện (Anti-IDOR - BR-002, CTRL-002, TC-011)
     conv = query_one(
         "SELECT id, title FROM conversations WHERE id = ? AND user_id = ?",
@@ -140,6 +171,10 @@ async def stream_message_endpoint(
             selected_model = def_model_row["id"] if def_model_row else "gemini-3.8-flash"
         final_model_used = selected_model
 
+        start_time = time.perf_counter()
+        ttft_recorded = False
+        ttft_ms = None
+
         try:
             from llm.agent import chat_agent
 
@@ -151,6 +186,12 @@ async def stream_message_endpoint(
                 if event.get("status") == "streaming":
                     token_str = event.get("token", "")
                     accumulated_response.append(token_str)
+
+                    # Đo đạc TTFT ngay khi nhận chunk token đầu tiên (FR-029)
+                    if not ttft_recorded:
+                        ttft_ms = (time.perf_counter() - start_time) * 1000
+                        ttft_recorded = True
+
                     data_payload = json.dumps({"token": token_str, "status": "streaming"}, ensure_ascii=False)
                     yield f"event: chunk\ndata: {data_payload}\n\n"
                 elif event.get("status") == "done":
@@ -170,15 +211,54 @@ async def stream_message_endpoint(
                 (assistant_msg_id, conversation_id, final_text, final_model_used)
             )
 
+            # Tính toán telemetry hoàn tất: latency, token usage, trừ quota & ghi log (FR-029, FR-030, BR-019)
+            total_latency_ms = (time.perf_counter() - start_time) * 1000
+            prompt_tokens_est = max(int(len(prompt_text.split()) * 1.3), 5)
+            completion_tokens_est = max(int(len(final_text.split()) * 1.3), 5)
+            total_tokens_est = prompt_tokens_est + completion_tokens_est
+
+            # Cập nhật Quota
+            quota_manager.consume_quota(user_id, total_tokens_est)
+
+            # Tìm provider của model
+            model_info = query_one("SELECT provider FROM models WHERE id = ?", (final_model_used,))
+            provider = model_info["provider"] if model_info else "google"
+
+            # Ghi log telemetry và broadcast SSE lên Dashboard (FR-033, OP-019)
+            metric_logger.log_metric(
+                endpoint=f"/api/v1/conversations/{conversation_id}/messages/stream",
+                method="POST",
+                status_code=200,
+                latency_ms=total_latency_ms,
+                user_id=user_id,
+                ttft_ms=ttft_ms,
+                model_name=final_model_used,
+                provider=provider,
+                prompt_tokens=prompt_tokens_est,
+                completion_tokens=completion_tokens_est,
+                total_tokens=total_tokens_est
+            )
+
             # Gửi sự kiện done hoàn tất (SEQ-003, ADR-004)
             done_payload = json.dumps({
                 "status": "done",
                 "message_id": assistant_msg_id,
-                "model": final_model_used
+                "model": final_model_used,
+                "tokens": total_tokens_est,
+                "latency_ms": round(total_latency_ms, 1)
             }, ensure_ascii=False)
             yield f"event: done\ndata: {done_payload}\n\n"
 
         except Exception as exc:
+            total_latency_ms = (time.perf_counter() - start_time) * 1000
+            metric_logger.log_metric(
+                endpoint=f"/api/v1/conversations/{conversation_id}/messages/stream",
+                method="POST",
+                status_code=500,
+                latency_ms=total_latency_ms,
+                user_id=user_id,
+                error_code="LLM_STREAM_ERROR"
+            )
             err_payload = json.dumps({"status": "error", "message": str(exc)}, ensure_ascii=False)
             yield f"event: error\ndata: {err_payload}\n\n"
 

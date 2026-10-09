@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from src.core.config import settings
+from src.core.telemetry_middleware import TelemetryMiddleware
 from src.api.v1.router import api_router
 
 app = FastAPI(
@@ -17,6 +18,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Telemetry & Performance monitoring middleware (BR-019, NFR-020)
+app.add_middleware(TelemetryMiddleware)
 
 # Mount API Routers
 app.include_router(api_router, prefix="/api/v1")

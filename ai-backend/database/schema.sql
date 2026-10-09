@@ -17,11 +17,13 @@ CREATE TABLE IF NOT EXISTS users (
     id VARCHAR(36) PRIMARY KEY,
     email VARCHAR(255) NOT NULL UNIQUE COLLATE NOCASE,
     full_name VARCHAR(255),
-    hashed_password VARCHAR(255) NOT NULL,
+    hashed_password VARCHAR(255), -- Cho phép NULL đối với tài khoản đăng ký thuần túy qua Discord OAuth2 (BR-018)
     username VARCHAR(50) UNIQUE COLLATE NOCASE,
     avatar_url VARCHAR(500),
     bio VARCHAR(500),
     phone_number VARCHAR(20),
+    discord_id VARCHAR(50) UNIQUE, -- Mã định danh Discord duy nhất (FR-027, FR-028)
+    discord_username VARCHAR(100), -- Tên hiển thị người dùng Discord
     theme_preference VARCHAR(10) NOT NULL DEFAULT 'DARK' CHECK (theme_preference IN ('DARK', 'LIGHT', 'SYSTEM')),
     language_preference VARCHAR(10) NOT NULL DEFAULT 'vi' CHECK (language_preference IN ('vi', 'en')),
     status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED')),
@@ -36,6 +38,9 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
 -- Chỉ mục tối ưu hóa tìm kiếm theo Tên đăng nhập Username (PROC-011, BR-007)
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+
+-- Chỉ mục tối ưu hóa định danh Discord OAuth2 (FR-027, FR-028, PROC-014)
+CREATE INDEX IF NOT EXISTS idx_users_discord_id ON users(discord_id);
 
 -- Trigger tự động cập nhật updated_at cho users khi có thay đổi bản ghi
 CREATE TRIGGER IF NOT EXISTS trg_users_updated_at
@@ -152,4 +157,41 @@ VALUES
     ('claude-3-7-sonnet', 'Anthropic Claude 3.7 Sonnet', 'anthropic', 'INACTIVE', 0, 200000, 8192, 1),
     ('llama-3.3-70b-versatile', 'Groq Llama 3.3 70B', 'groq', 'INACTIVE', 0, 128000, 8192, 1),
     ('llama3', 'Ollama Local Llama 3', 'ollama', 'INACTIVE', 0, 8192, 2048, 1);
+
+-- ==============================================================================
+-- 5. BẢNG NHẬT KÝ ĐO ĐẠC TELEMETRY & QUẢN LÝ QUOTA TÀI NGUYÊN (RESOURCE TELEMETRY)
+-- ==============================================================================
+
+CREATE TABLE IF NOT EXISTS api_metric_logs (
+    id VARCHAR(36) PRIMARY KEY,
+    user_id VARCHAR(36) REFERENCES users(id) ON DELETE SET NULL,
+    endpoint VARCHAR(255) NOT NULL,
+    method VARCHAR(10) NOT NULL,
+    status_code INTEGER NOT NULL,
+    latency_ms REAL NOT NULL,
+    ttft_ms REAL DEFAULT NULL,
+    model_name VARCHAR(100) DEFAULT NULL,
+    provider VARCHAR(50) DEFAULT NULL,
+    prompt_tokens INTEGER DEFAULT 0,
+    completion_tokens INTEGER DEFAULT 0,
+    total_tokens INTEGER DEFAULT 0,
+    error_code VARCHAR(100) DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_metric_user_created ON api_metric_logs(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_metric_created ON api_metric_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_metric_endpoint ON api_metric_logs(endpoint);
+
+CREATE TABLE IF NOT EXISTS user_quotas (
+    user_id VARCHAR(36) PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    daily_token_limit INTEGER NOT NULL DEFAULT 100000,
+    daily_tokens_used INTEGER NOT NULL DEFAULT 0,
+    reset_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_quotas_reset ON user_quotas(reset_at);
+
 

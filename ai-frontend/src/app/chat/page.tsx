@@ -376,6 +376,11 @@ export default function ChatWorkspacePage() {
       });
 
       if (!response.ok) {
+        if (response.status === 429) {
+          const errData = await response.json().catch(() => null);
+          const msg = errData?.detail?.message || 'Hạn ngạch token trong ngày đã hết. Vui lòng kiểm tra trên Dashboard.';
+          throw new Error(`🚨 ${msg}`);
+        }
         throw new Error('Lỗi kết nối tới luồng AI.');
       }
 
@@ -873,6 +878,26 @@ export default function ChatWorkspacePage() {
               <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#10b981' }} />
               <span>AI-Chan Online (SSE Active)</span>
             </div>
+
+            <Link
+              href="/dashboard"
+              title="Quản lý tài nguyên & Telemetry Dashboard"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '6px 12px',
+                borderRadius: 'var(--radius-sm)',
+                background: 'rgba(56, 189, 248, 0.12)',
+                border: '1px solid rgba(56, 189, 248, 0.35)',
+                fontSize: '0.8rem',
+                color: '#38bdf8',
+                textDecoration: 'none',
+                fontWeight: 600
+              }}
+            >
+              <span>📊 Dashboard</span>
+            </Link>
 
             <Link
               href="/settings"

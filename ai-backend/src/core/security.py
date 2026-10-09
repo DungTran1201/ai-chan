@@ -90,6 +90,7 @@ async def get_current_user(request: Request) -> Dict:
     user = query_one(
         """
         SELECT id, email, full_name, username, avatar_url, bio, phone_number,
+               discord_id, discord_username,
                theme_preference, language_preference, status, created_at,
                last_login_at, password_changed_at
         FROM users WHERE id = ?
@@ -109,3 +110,37 @@ async def get_current_user(request: Request) -> Dict:
         )
 
     return user
+
+def generate_oauth_state() -> str:
+    """Sinh chuỗi state ngẫu nhiên kèm timestamp và chữ ký HMAC-SHA256 (BR-016, SEC-008)."""
+    import hmac
+    import hashlib
+    import secrets
+    nonce = secrets.token_hex(16)
+    ts = int(time.time())
+    data = f"{nonce}:{ts}"
+    signature = hmac.new(settings.SECRET_KEY.encode(), data.encode(), hashlib.sha256).hexdigest()
+    return f"{data}:{signature}"
+
+def verify_oauth_state(received_state: Optional[str], cookie_state: Optional[str]) -> bool:
+    """Kiểm tra khớp cookie, tính toàn vẹn chữ ký HMAC và hạn sử dụng <= 10 phút (BR-016, SEC-008)."""
+    import hmac
+    import hashlib
+    if not received_state or not cookie_state or received_state != cookie_state:
+        return False
+    parts = received_state.split(":")
+    if len(parts) != 3:
+        return False
+    nonce, ts_str, signature = parts
+    try:
+        ts = int(ts_str)
+    except ValueError:
+        return False
+    now = time.time()
+    # Kiểm tra thời hạn 10 phút (600 giây) và không lệch thời gian tương lai > 10s
+    if (now - ts > 600) or (now < ts - 10):
+        return False
+    expected_data = f"{nonce}:{ts_str}"
+    expected_sig = hmac.new(settings.SECRET_KEY.encode(), expected_data.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected_sig)
+

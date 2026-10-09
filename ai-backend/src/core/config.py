@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     DEFAULT_LLM_PROVIDER: str = "gemini"
     DEFAULT_LLM_MODEL: str = "gemini-1.5-flash"
 
+    # Discord OAuth2 Settings (ADR-007, SEC-008)
+    DISCORD_CLIENT_ID: str = ""
+    DISCORD_CLIENT_SECRET: str = ""
+    DISCORD_REDIRECT_URI: str = "http://localhost:3000/api/v1/auth/discord/callback"
+
     model_config = SettingsConfigDict(
         env_file=_env_path,
         env_file_encoding="utf-8",

@@ -44,12 +44,38 @@ def run_migration():
                 cur.executescript(f.read())
             conn.commit()
 
-        # Verify models table
+        # 3. Apply 004_discord_oauth_support.sql if columns missing
+        user_cols = [c[1] for c in cur.execute("PRAGMA table_info(users)").fetchall()]
+        if "discord_id" not in user_cols:
+            print(f"Adding discord_id and discord_username to users in {db_path.name}...")
+            cur.execute("ALTER TABLE users ADD COLUMN discord_id VARCHAR(50)")
+            cur.execute("ALTER TABLE users ADD COLUMN discord_username VARCHAR(100)")
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord_id ON users(discord_id)")
+            conn.commit()
+
+        # 4. Apply 005_resource_telemetry_and_quotas.sql
+        migration_005_file = MIGRATIONS_DIR / "005_resource_telemetry_and_quotas.sql"
+        if migration_005_file.exists():
+            print(f"Executing {migration_005_file.name} on {db_path.name}...")
+            with open(migration_005_file, "r", encoding="utf-8") as f:
+                cur.executescript(f.read())
+            conn.commit()
+
+        # 5. Seed default quotas for existing users without quota records
+        cur.execute("""
+            INSERT OR IGNORE INTO user_quotas (user_id, daily_token_limit, daily_tokens_used, reset_at)
+            SELECT id, 100000, 0, datetime('now', '+1 day', 'start of day')
+            FROM users
+            WHERE id NOT IN (SELECT user_id FROM user_quotas)
+        """)
+        conn.commit()
+
+        # Verify tables
         tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
         print(f"Tables in {db_path.name}: {tables}")
-        if "models" in tables:
-            model_count = cur.execute("SELECT COUNT(*) FROM models").fetchone()[0]
-            print(f"Total models registered in {db_path.name}: {model_count}")
+        if "api_metric_logs" in tables and "user_quotas" in tables:
+            quota_count = cur.execute("SELECT COUNT(*) FROM user_quotas").fetchone()[0]
+            print(f"Total user quotas in {db_path.name}: {quota_count}")
             
         conn.close()
 
