@@ -70,6 +70,17 @@ def run_migration():
         """)
         conn.commit()
 
+        # 6. Apply 006_model_archival_and_catalog_extensions.sql (if status constraint does not yet include ARCHIVED)
+        models_sql_row = cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='models'").fetchone()
+        if models_sql_row and "ARCHIVED" not in models_sql_row[0]:
+            migration_006_file = MIGRATIONS_DIR / "006_model_archival_and_catalog_extensions.sql"
+            if migration_006_file.exists():
+                print(f"Executing {migration_006_file.name} on {db_path.name}...")
+                with open(migration_006_file, "r", encoding="utf-8") as f:
+                    cur.executescript(f.read())
+                conn.commit()
+                print(f"Applied 006 migration successfully to {db_path.name}.")
+
         # Verify tables
         tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
         print(f"Tables in {db_path.name}: {tables}")

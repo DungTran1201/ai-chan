@@ -29,7 +29,7 @@ export interface AgentModel {
   id: string;
   name: string;
   provider: 'google' | 'anthropic' | 'openai' | 'groq' | 'ollama';
-  status: 'ACTIVE' | 'INACTIVE' | 'DEGRADED';
+  status: 'ACTIVE' | 'INACTIVE' | 'DEGRADED' | 'ARCHIVED';
   is_default: boolean;
   context_window: number;
   max_tokens: number;
@@ -39,6 +39,12 @@ export interface AgentModel {
   last_checked_at: string | null;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface ModelSearchResponse {
+  total: number;
+  execution_time_ms: number;
+  items: AgentModel[];
 }
 
 export interface UserQuotaStatus {

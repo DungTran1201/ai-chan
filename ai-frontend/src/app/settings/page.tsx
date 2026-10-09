@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { AgentModel } from '@/types';
+import { AgentModel, ModelSearchResponse } from '@/types';
 
 interface UserProfile {
   id: string;
@@ -65,14 +65,45 @@ export default function SettingsPage() {
   const [languagePreference, setLanguagePreference] = useState<'vi' | 'en'>('vi');
   const [savingPreferences, setSavingPreferences] = useState(false);
 
-  // Tab 4: Models state (FR-021 to FR-026, BR-012 to BR-015)
+  // Tab 4: Models state (FR-021 to FR-026, FR-035 to FR-039)
   const [models, setModels] = useState<AgentModel[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
-  const [modelFilterStatus, setModelFilterStatus] = useState<'ALL' | 'ACTIVE' | 'INACTIVE'>('ALL');
+  const [modelFilterStatus, setModelFilterStatus] = useState<'ALL' | 'ACTIVE' | 'INACTIVE' | 'ARCHIVED'>('ALL');
   const [modelFilterProvider, setModelFilterProvider] = useState<string>('ALL');
+  const [modelSearchQuery, setModelSearchQuery] = useState<string>('');
+  const [modelSort, setModelSort] = useState<'name_asc' | 'latency_asc' | 'context_desc'>('name_asc');
+  const [modelOnlyWithKey, setModelOnlyWithKey] = useState<boolean>(false);
+  const [searchLatencyMs, setSearchLatencyMs] = useState<number | null>(null);
+
   const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const [togglingModelId, setTogglingModelId] = useState<string | null>(null);
   const [settingDefaultId, setSettingDefaultId] = useState<string | null>(null);
+
+  // Modal Create state (FR-035, OP-022)
+  const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
+  const [createModelForm, setCreateModelForm] = useState({
+    id: '',
+    name: '',
+    provider: 'google',
+    context_window: 128000,
+    max_tokens: 4096,
+    supports_streaming: true
+  });
+  const [creatingModel, setCreatingModel] = useState<boolean>(false);
+
+  // Modal Edit state (FR-036, OP-023)
+  const [editingModel, setEditingModel] = useState<AgentModel | null>(null);
+  const [editModelForm, setEditModelForm] = useState({
+    name: '',
+    context_window: 128000,
+    max_tokens: 4096,
+    supports_streaming: true
+  });
+  const [updatingModel, setUpdatingModel] = useState<boolean>(false);
+
+  // Confirm Archive Modal state (FR-039, OP-025, BR-023)
+  const [confirmArchiveModel, setConfirmArchiveModel] = useState<AgentModel | null>(null);
+  const [archivingModelId, setArchivingModelId] = useState<string | null>(null);
 
   const showToast = (type: 'success' | 'error', message: string) => {
     setToast({ type, message });
@@ -128,15 +159,24 @@ export default function SettingsPage() {
     }
   }, []);
 
-  const fetchModels = async () => {
+  const fetchModels = async (searchQ?: string) => {
     try {
       setLoadingModels(true);
-      const res = await fetch('/api/v1/models?status=ALL');
+      const q = searchQ !== undefined ? searchQ : modelSearchQuery;
+      const params = new URLSearchParams();
+      if (q && q.trim()) params.append('q', q.trim());
+      if (modelFilterProvider && modelFilterProvider !== 'ALL') params.append('provider', modelFilterProvider);
+      if (modelFilterStatus && modelFilterStatus !== 'ALL') params.append('status', modelFilterStatus);
+      if (modelSort) params.append('sort', modelSort);
+      if (modelOnlyWithKey) params.append('has_api_key', 'true');
+
+      const res = await fetch(`/api/v1/models/search?${params.toString()}`);
       if (!res.ok) {
         throw new Error('Không thể tải danh sách mô hình từ máy chủ.');
       }
-      const data: AgentModel[] = await res.json();
-      setModels(data);
+      const data: ModelSearchResponse = await res.json();
+      setModels(data.items);
+      setSearchLatencyMs(data.execution_time_ms);
     } catch (err: any) {
       showToast('error', err.message || 'Lỗi khi tải danh sách mô hình.');
     } finally {
@@ -148,7 +188,15 @@ export default function SettingsPage() {
     if (activeTab === 'models') {
       fetchModels();
     }
-  }, [activeTab]);
+  }, [activeTab, modelFilterStatus, modelFilterProvider, modelSort, modelOnlyWithKey]);
+
+  useEffect(() => {
+    if (activeTab !== 'models') return;
+    const timer = setTimeout(() => {
+      fetchModels(modelSearchQuery);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [modelSearchQuery]);
 
   const handleTestConnection = async (model: AgentModel) => {
     setTestingModelId(model.id);
@@ -244,6 +292,124 @@ export default function SettingsPage() {
     }
   };
 
+  // FR-035: Thêm mô hình mới
+  const handleCreateModel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!createModelForm.id.trim() || !createModelForm.name.trim()) {
+      showToast('error', 'Vui lòng nhập đầy đủ Mã ID và Tên mô hình.');
+      return;
+    }
+    if (createModelForm.max_tokens > createModelForm.context_window) {
+      showToast('error', 'Phản hồi tối đa (max_tokens) không được lớn hơn ngữ cảnh tối đa (BR-024).');
+      return;
+    }
+    if (createModelForm.context_window < 1000 || createModelForm.max_tokens < 256) {
+      showToast('error', 'Ngưỡng an toàn tối thiểu: Ngữ cảnh >= 1,000 và Phản hồi >= 256 tokens (BR-024).');
+      return;
+    }
+
+    setCreatingModel(true);
+    try {
+      const res = await fetch('/api/v1/models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(createModelForm)
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || 'Không thể đăng ký mô hình mới.');
+      }
+      showToast('success', `🎉 Đăng ký thành công mô hình ${createModelForm.name}!`);
+      setShowCreateModal(false);
+      setCreateModelForm({
+        id: '',
+        name: '',
+        provider: 'google',
+        context_window: 128000,
+        max_tokens: 4096,
+        supports_streaming: true
+      });
+      await fetchModels();
+    } catch (err: any) {
+      showToast('error', err.message || 'Lỗi khi đăng ký mô hình.');
+    } finally {
+      setCreatingModel(false);
+    }
+  };
+
+  // FR-036: Hiệu chỉnh cấu hình mô hình
+  const openEditModal = (model: AgentModel) => {
+    setEditingModel(model);
+    setEditModelForm({
+      name: model.name,
+      context_window: model.context_window,
+      max_tokens: model.max_tokens,
+      supports_streaming: model.supports_streaming
+    });
+  };
+
+  const handleUpdateModel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingModel) return;
+    if (!editModelForm.name.trim()) {
+      showToast('error', 'Tên mô hình không được để trống.');
+      return;
+    }
+    if (editModelForm.max_tokens > editModelForm.context_window) {
+      showToast('error', 'Phản hồi tối đa (max_tokens) không được lớn hơn ngữ cảnh tối đa (BR-024).');
+      return;
+    }
+    if (editModelForm.context_window < 1000 || editModelForm.max_tokens < 256) {
+      showToast('error', 'Ngưỡng an toàn tối thiểu: Ngữ cảnh >= 1,000 và Phản hồi >= 256 tokens (BR-024).');
+      return;
+    }
+
+    setUpdatingModel(true);
+    try {
+      const res = await fetch(`/api/v1/models/${editingModel.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editModelForm)
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || 'Không thể cập nhật cấu hình mô hình.');
+      }
+      showToast('success', `✅ Cập nhật thành công cấu hình cho ${editingModel.id}!`);
+      setEditingModel(null);
+      await fetchModels();
+    } catch (err: any) {
+      showToast('error', err.message || 'Lỗi khi cập nhật mô hình.');
+    } finally {
+      setUpdatingModel(false);
+    }
+  };
+
+  // FR-039: Xóa mềm & Lưu trữ an toàn
+  const handleArchiveModel = async (model: AgentModel) => {
+    if (model.is_default) {
+      showToast('error', `Không thể lưu trữ '${model.name}' vì đang là mô hình mặc định của hệ thống (BR-023). Hãy chọn mô hình khác làm mặc định trước.`);
+      return;
+    }
+    setArchivingModelId(model.id);
+    try {
+      const res = await fetch(`/api/v1/models/${model.id}`, {
+        method: 'DELETE'
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || 'Không thể lưu trữ mô hình.');
+      }
+      showToast('success', `📦 ${data.message}`);
+      setConfirmArchiveModel(null);
+      await fetchModels();
+    } catch (err: any) {
+      showToast('error', err.message || 'Lỗi khi lưu trữ mô hình.');
+    } finally {
+      setArchivingModelId(null);
+    }
+  };
+
   const getProviderMeta = (provider: string) => {
     switch (provider.toLowerCase()) {
       case 'google':
@@ -328,6 +494,14 @@ export default function SettingsPage() {
           badgeBorder: 'rgba(245, 158, 11, 0.4)',
           textColor: '#fbbf24',
           dotColor: '#f59e0b'
+        };
+      case 'ARCHIVED':
+        return {
+          label: 'Đã lưu trữ',
+          badgeBg: 'rgba(239, 68, 68, 0.12)',
+          badgeBorder: 'rgba(239, 68, 68, 0.35)',
+          textColor: '#f87171',
+          dotColor: '#ef4444'
         };
       default:
         return {
@@ -1322,7 +1496,7 @@ export default function SettingsPage() {
         )}
 
         {/* ============================================================ */}
-        {/* TAB 4: QUẢN LÝ MODELS & AGENTS (FR-021 TO FR-026, BR-012)    */}
+        {/* TAB 4: QUẢN LÝ MODELS & AGENTS (FR-021 TO FR-026, FR-035..39)*/}
         {/* ============================================================ */}
         {activeTab === 'models' && (
           <div style={{
@@ -1332,40 +1506,126 @@ export default function SettingsPage() {
             padding: '2rem',
             backdropFilter: 'blur(16px)'
           }}>
+            {/* Header: Title & Action Buttons */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '1rem' }}>
               <div>
                 <h2 style={{ fontSize: '1.25rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
                   🤖 Danh Mục Mô Hình & AI Agents
                 </h2>
                 <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginTop: '4px' }}>
-                  Quản lý trạng thái Soft-Toggle, đo lường độ trễ mạng và thiết lập mô hình mặc định từ các nhà cung cấp bên ngoài.
+                  Quản lý vòng đời mô hình, tìm kiếm & bộ lọc đa thuộc tính, đo lường độ trễ mạng và cấu hình tham số động.
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={fetchModels}
-                disabled={loadingModels}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  padding: '8px 16px',
-                  borderRadius: 'var(--radius-sm)',
-                  background: 'rgba(255, 255, 255, 0.06)',
-                  border: '1px solid var(--border-subtle)',
-                  color: '#fff',
-                  fontSize: '0.85rem',
-                  fontWeight: 600,
-                  cursor: loadingModels ? 'not-allowed' : 'pointer'
-                }}
-              >
-                <span>{loadingModels ? '⏳' : '🔄'}</span>
-                <span>{loadingModels ? 'Đang tải...' : 'Làm mới'}</span>
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                {/* Button: Add New Model (FR-035) */}
+                <button
+                  type="button"
+                  onClick={() => setShowCreateModal(true)}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '8px 16px',
+                    borderRadius: 'var(--radius-sm)',
+                    background: 'linear-gradient(135deg, #4f46e5, #7c3aed)',
+                    border: '1px solid rgba(124, 58, 237, 0.5)',
+                    color: '#fff',
+                    fontSize: '0.85rem',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    boxShadow: '0 4px 12px rgba(79, 70, 229, 0.3)',
+                    transition: 'all 0.2s ease'
+                  }}
+                >
+                  <span>✨</span>
+                  <span>+ Thêm mô hình mới</span>
+                </button>
+
+                {/* Button: Refresh */}
+                <button
+                  type="button"
+                  onClick={() => fetchModels()}
+                  disabled={loadingModels}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '8px 16px',
+                    borderRadius: 'var(--radius-sm)',
+                    background: 'rgba(255, 255, 255, 0.06)',
+                    border: '1px solid var(--border-subtle)',
+                    color: '#fff',
+                    fontSize: '0.85rem',
+                    fontWeight: 600,
+                    cursor: loadingModels ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  <span>{loadingModels ? '⏳' : '🔄'}</span>
+                  <span>{loadingModels ? 'Đang tải...' : 'Làm mới'}</span>
+                </button>
+              </div>
             </div>
 
-            {/* Quick Filter Toolbar */}
+            {/* Instant Search Bar (FR-037, NFR-022) */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              padding: '12px 16px',
+              borderRadius: 'var(--radius-md)',
+              background: 'rgba(0,0,0,0.3)',
+              border: '1px solid var(--border-subtle)',
+              marginBottom: '1rem'
+            }}>
+              <span style={{ fontSize: '1.1rem', color: 'var(--text-muted)' }}>🔍</span>
+              <input
+                type="text"
+                value={modelSearchQuery}
+                onChange={(e) => setModelSearchQuery(e.target.value)}
+                placeholder="Tìm kiếm nhanh theo tên mô hình hoặc ID (ví dụ: gemini, claude, gpt)..."
+                style={{
+                  flex: 1,
+                  background: 'transparent',
+                  border: 'none',
+                  outline: 'none',
+                  color: '#fff',
+                  fontSize: '0.88rem'
+                }}
+              />
+              {modelSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setModelSearchQuery('')}
+                  title="Xóa tìm kiếm"
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--text-muted)',
+                    cursor: 'pointer',
+                    fontSize: '0.85rem'
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+              {searchLatencyMs !== null && (
+                <span style={{
+                  padding: '3px 8px',
+                  borderRadius: 'var(--radius-full)',
+                  background: 'rgba(16, 185, 129, 0.12)',
+                  border: '1px solid rgba(16, 185, 129, 0.3)',
+                  color: '#34d399',
+                  fontSize: '0.75rem',
+                  fontWeight: 600,
+                  whiteSpace: 'nowrap'
+                }}>
+                  ⚡ Phản hồi: {searchLatencyMs} ms (SLA &le; 200ms)
+                </span>
+              )}
+            </div>
+
+            {/* Multi-Attribute Filter & Sort Toolbar (FR-038) */}
             <div style={{
               display: 'flex',
               alignItems: 'center',
@@ -1380,8 +1640,14 @@ export default function SettingsPage() {
             }}>
               {/* Status Filter Tabs */}
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                {(['ALL', 'ACTIVE', 'INACTIVE'] as const).map(st => {
-                  const label = st === 'ALL' ? `Tất cả (${models.length})` : st === 'ACTIVE' ? `🟢 Hoạt động (${models.filter(m => m.status === 'ACTIVE').length})` : `⚪ Tạm dừng (${models.filter(m => m.status === 'INACTIVE').length})`;
+                {(['ALL', 'ACTIVE', 'INACTIVE', 'ARCHIVED'] as const).map(st => {
+                  const label = st === 'ALL'
+                    ? `Tất cả (${models.length})`
+                    : st === 'ACTIVE'
+                    ? `🟢 Hoạt động`
+                    : st === 'INACTIVE'
+                    ? `⚪ Tạm dừng`
+                    : `📦 Đã lưu trữ`;
                   const isSelected = modelFilterStatus === st;
                   return (
                     <button
@@ -1406,29 +1672,65 @@ export default function SettingsPage() {
                 })}
               </div>
 
-              {/* Provider Filter Select */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>Nhà cung cấp:</span>
-                <select
-                  value={modelFilterProvider}
-                  onChange={(e) => setModelFilterProvider(e.target.value)}
-                  style={{
-                    padding: '6px 12px',
-                    borderRadius: 'var(--radius-sm)',
-                    background: 'rgba(0,0,0,0.35)',
-                    border: '1px solid var(--border-subtle)',
-                    color: '#fff',
-                    fontSize: '0.82rem',
-                    cursor: 'pointer'
-                  }}
-                >
-                  <option value="ALL" style={{ background: '#111827', color: '#fff' }}>Tất cả nhà cung cấp</option>
-                  <option value="google" style={{ background: '#111827', color: '#fff' }}>Google Gemini</option>
-                  <option value="openai" style={{ background: '#111827', color: '#fff' }}>OpenAI</option>
-                  <option value="anthropic" style={{ background: '#111827', color: '#fff' }}>Anthropic</option>
-                  <option value="groq" style={{ background: '#111827', color: '#fff' }}>Groq</option>
-                  <option value="ollama" style={{ background: '#111827', color: '#fff' }}>Ollama</option>
-                </select>
+              {/* Right Selectors: Provider, Sort, Key Toggle */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                {/* Provider Filter Select */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Hãng:</span>
+                  <select
+                    value={modelFilterProvider}
+                    onChange={(e) => setModelFilterProvider(e.target.value)}
+                    style={{
+                      padding: '6px 10px',
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'rgba(0,0,0,0.35)',
+                      border: '1px solid var(--border-subtle)',
+                      color: '#fff',
+                      fontSize: '0.8rem',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="ALL" style={{ background: '#111827', color: '#fff' }}>Tất cả hãng</option>
+                    <option value="google" style={{ background: '#111827', color: '#fff' }}>Google Gemini</option>
+                    <option value="openai" style={{ background: '#111827', color: '#fff' }}>OpenAI</option>
+                    <option value="anthropic" style={{ background: '#111827', color: '#fff' }}>Anthropic</option>
+                    <option value="groq" style={{ background: '#111827', color: '#fff' }}>Groq</option>
+                    <option value="ollama" style={{ background: '#111827', color: '#fff' }}>Ollama</option>
+                  </select>
+                </div>
+
+                {/* Sort Order Select */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Sắp xếp:</span>
+                  <select
+                    value={modelSort}
+                    onChange={(e) => setModelSort(e.target.value as any)}
+                    style={{
+                      padding: '6px 10px',
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'rgba(0,0,0,0.35)',
+                      border: '1px solid var(--border-subtle)',
+                      color: '#fff',
+                      fontSize: '0.8rem',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="name_asc" style={{ background: '#111827', color: '#fff' }}>Tên (A-Z)</option>
+                    <option value="latency_asc" style={{ background: '#111827', color: '#fff' }}>Độ trễ thấp nhất</option>
+                    <option value="context_desc" style={{ background: '#111827', color: '#fff' }}>Ngữ cảnh lớn nhất</option>
+                  </select>
+                </div>
+
+                {/* Has API Key Toggle */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={modelOnlyWithKey}
+                    onChange={(e) => setModelOnlyWithKey(e.target.checked)}
+                    style={{ cursor: 'pointer' }}
+                  />
+                  <span>Chỉ hiện có API Key</span>
+                </label>
               </div>
             </div>
 
@@ -1438,278 +1740,345 @@ export default function SettingsPage() {
                 <div style={{ fontSize: '2rem', marginBottom: '8px' }}>⏳</div>
                 <div>Đang tải danh mục mô hình AI...</div>
               </div>
+            ) : models.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)', background: 'rgba(0,0,0,0.15)', borderRadius: 'var(--radius-md)' }}>
+                <div style={{ fontSize: '2rem', marginBottom: '8px' }}>🔍</div>
+                <div style={{ fontWeight: 600, color: '#e2e8f0', marginBottom: '4px' }}>Không tìm thấy mô hình nào phù hợp</div>
+                <div style={{ fontSize: '0.85rem' }}>Hãy thử thay đổi từ khóa tìm kiếm hoặc điều chỉnh lại bộ lọc trạng thái / nhà cung cấp.</div>
+              </div>
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '1.25rem', marginBottom: '2rem' }}>
-                {models
-                  .filter(m => {
-                    const passStatus = modelFilterStatus === 'ALL' || m.status === modelFilterStatus;
-                    const passProvider = modelFilterProvider === 'ALL' || m.provider.toLowerCase() === modelFilterProvider.toLowerCase();
-                    return passStatus && passProvider;
-                  })
-                  .map(m => {
-                    const pMeta = getProviderMeta(m.provider);
-                    const sMeta = getStatusMeta(m.status);
-                    const isTesting = testingModelId === m.id;
-                    const isToggling = togglingModelId === m.id;
-                    const isSettingDef = settingDefaultId === m.id;
+                {models.map(m => {
+                  const pMeta = getProviderMeta(m.provider);
+                  const sMeta = getStatusMeta(m.status);
+                  const isTesting = testingModelId === m.id;
+                  const isToggling = togglingModelId === m.id;
+                  const isSettingDef = settingDefaultId === m.id;
+                  const isArchiving = archivingModelId === m.id;
+                  const isArchived = m.status === 'ARCHIVED';
 
-                    return (
-                      <div
-                        key={m.id}
-                        style={{
-                          borderRadius: 'var(--radius-md)',
-                          background: 'rgba(15, 23, 42, 0.65)',
-                          border: m.is_default ? '2px solid rgba(245, 158, 11, 0.6)' : `1px solid ${pMeta.border}`,
-                          boxShadow: m.is_default ? '0 0 20px rgba(245, 158, 11, 0.2)' : 'none',
-                          padding: '1.25rem',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          justifyContent: 'space-between',
-                          backdropFilter: 'blur(10px)',
-                          transition: 'transform 0.2s ease, border-color 0.2s ease'
-                        }}
-                      >
-                        {/* Top: Header with Provider, Name & Status */}
-                        <div>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-                            {/* Provider pill */}
-                            <span style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: '6px',
-                              padding: '4px 10px',
-                              borderRadius: 'var(--radius-full)',
-                              background: pMeta.badgeBg,
-                              border: `1px solid ${pMeta.border}`,
-                              fontSize: '0.75rem',
-                              fontWeight: 600,
-                              color: pMeta.textColor
-                            }}>
-                              <span>{pMeta.icon}</span>
-                              <span>{pMeta.label}</span>
-                            </span>
+                  return (
+                    <div
+                      key={m.id}
+                      style={{
+                        borderRadius: 'var(--radius-md)',
+                        background: isArchived ? 'rgba(15, 23, 42, 0.4)' : 'rgba(15, 23, 42, 0.65)',
+                        border: m.is_default
+                          ? '2px solid rgba(245, 158, 11, 0.6)'
+                          : isArchived
+                          ? '1px dashed rgba(239, 68, 68, 0.3)'
+                          : `1px solid ${pMeta.border}`,
+                        boxShadow: m.is_default ? '0 0 20px rgba(245, 158, 11, 0.2)' : 'none',
+                        padding: '1.25rem',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        justifyContent: 'space-between',
+                        backdropFilter: 'blur(10px)',
+                        opacity: isArchived ? 0.75 : 1,
+                        transition: 'transform 0.2s ease, border-color 0.2s ease'
+                      }}
+                    >
+                      {/* Top: Header with Provider, Name & Status */}
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                          {/* Provider pill */}
+                          <span style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            padding: '4px 10px',
+                            borderRadius: 'var(--radius-full)',
+                            background: pMeta.badgeBg,
+                            border: `1px solid ${pMeta.border}`,
+                            fontSize: '0.75rem',
+                            fontWeight: 600,
+                            color: pMeta.textColor
+                          }}>
+                            <span>{pMeta.icon}</span>
+                            <span>{pMeta.label}</span>
+                          </span>
 
-                            {/* Status & Default Badges */}
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              {m.is_default && (
-                                <span style={{
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                  padding: '3px 8px',
-                                  borderRadius: 'var(--radius-full)',
-                                  background: 'rgba(245, 158, 11, 0.2)',
-                                  border: '1px solid rgba(245, 158, 11, 0.5)',
-                                  color: '#fbbf24',
-                                  fontSize: '0.72rem',
-                                  fontWeight: 700
-                                }}>
-                                  ⭐ Mặc định
-                                </span>
-                              )}
+                          {/* Status & Default Badges */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            {m.is_default && (
                               <span style={{
                                 display: 'inline-flex',
                                 alignItems: 'center',
-                                gap: '5px',
+                                gap: '4px',
                                 padding: '3px 8px',
                                 borderRadius: 'var(--radius-full)',
-                                background: sMeta.badgeBg,
-                                border: `1px solid ${sMeta.badgeBorder}`,
-                                color: sMeta.textColor,
+                                background: 'rgba(245, 158, 11, 0.2)',
+                                border: '1px solid rgba(245, 158, 11, 0.5)',
+                                color: '#fbbf24',
                                 fontSize: '0.72rem',
-                                fontWeight: 600
+                                fontWeight: 700
                               }}>
-                                <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: sMeta.dotColor }} />
-                                <span>{sMeta.label}</span>
+                                ⭐ Mặc định
                               </span>
-                            </div>
-                          </div>
-
-                          {/* Model Title & ID */}
-                          <div style={{ marginBottom: '12px' }}>
-                            <h3 style={{ fontSize: '1.05rem', fontWeight: 700, color: '#f8fafc', marginBottom: '2px' }}>
-                              {m.name}
-                            </h3>
-                            <div style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
-                              ID: {m.id}
-                            </div>
-                          </div>
-
-                          {/* Key Presence Indicator */}
-                          <div style={{
-                            padding: '6px 10px',
-                            borderRadius: 'var(--radius-sm)',
-                            background: m.has_api_key ? 'rgba(16, 185, 129, 0.08)' : 'rgba(245, 158, 11, 0.08)',
-                            border: `1px solid ${m.has_api_key ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)'}`,
-                            fontSize: '0.75rem',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            marginBottom: '12px'
-                          }}>
-                            <span style={{ color: m.has_api_key ? '#34d399' : '#fbbf24', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <span>{m.has_api_key ? '🔑' : '⚠️'}</span>
-                              <span>{m.has_api_key ? 'API Key đã cấu hình trong .env' : 'Chưa cấu hình API Key trong .env'}</span>
+                            )}
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '5px',
+                              padding: '3px 8px',
+                              borderRadius: 'var(--radius-full)',
+                              background: sMeta.badgeBg,
+                              border: `1px solid ${sMeta.badgeBorder}`,
+                              color: sMeta.textColor,
+                              fontSize: '0.72rem',
+                              fontWeight: 600
+                            }}>
+                              <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: sMeta.dotColor }} />
+                              <span>{sMeta.label}</span>
                             </span>
-                            {m.latency_ms ? (
-                              <span style={{ color: '#38bdf8', fontWeight: 600 }}>
-                                ⚡ {m.latency_ms} ms
-                              </span>
-                            ) : null}
-                          </div>
-
-                          {/* Technical Specs 2x2 Grid */}
-                          <div style={{
-                            display: 'grid',
-                            gridTemplateColumns: 'repeat(2, 1fr)',
-                            gap: '8px',
-                            background: 'rgba(0,0,0,0.2)',
-                            borderRadius: 'var(--radius-sm)',
-                            padding: '10px',
-                            marginBottom: '14px',
-                            fontSize: '0.78rem'
-                          }}>
-                            <div>
-                              <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.72rem' }}>Ngữ cảnh tối đa</span>
-                              <span style={{ fontWeight: 600, color: '#e2e8f0' }}>{m.context_window.toLocaleString()} tokens</span>
-                            </div>
-                            <div>
-                              <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.72rem' }}>Phản hồi tối đa</span>
-                              <span style={{ fontWeight: 600, color: '#e2e8f0' }}>{m.max_tokens.toLocaleString()} tokens</span>
-                            </div>
-                            <div>
-                              <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.72rem' }}>Streaming SSE</span>
-                              <span style={{ fontWeight: 600, color: m.supports_streaming ? '#34d399' : '#94a3b8' }}>
-                                {m.supports_streaming ? '✓ Hỗ trợ' : '✗ Không'}
-                              </span>
-                            </div>
-                            <div>
-                              <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.72rem' }}>Kiểm tra gần nhất</span>
-                              <span style={{ fontWeight: 500, color: '#94a3b8' }}>
-                                {m.last_checked_at ? new Date(m.last_checked_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'Chưa đo'}
-                              </span>
-                            </div>
                           </div>
                         </div>
 
-                        {/* Actions Footer Toolbar */}
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
-                          <div style={{ display: 'flex', gap: '8px' }}>
-                            {/* Ping / Test Button */}
+                        {/* Model Title & ID */}
+                        <div style={{ marginBottom: '12px' }}>
+                          <h3 style={{ fontSize: '1.05rem', fontWeight: 700, color: '#f8fafc', marginBottom: '2px' }}>
+                            {m.name}
+                          </h3>
+                          <div style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                            ID: {m.id}
+                          </div>
+                        </div>
+
+                        {/* Key Presence Indicator */}
+                        <div style={{
+                          padding: '6px 10px',
+                          borderRadius: 'var(--radius-sm)',
+                          background: m.has_api_key ? 'rgba(16, 185, 129, 0.08)' : 'rgba(245, 158, 11, 0.08)',
+                          border: `1px solid ${m.has_api_key ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)'}`,
+                          fontSize: '0.75rem',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          marginBottom: '12px'
+                        }}>
+                          <span style={{ color: m.has_api_key ? '#34d399' : '#fbbf24', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span>{m.has_api_key ? '🔑' : '⚠️'}</span>
+                            <span>{m.has_api_key ? 'API Key đã cấu hình trong .env' : 'Chưa cấu hình API Key trong .env'}</span>
+                          </span>
+                          {m.latency_ms ? (
+                            <span style={{ color: '#38bdf8', fontWeight: 600 }}>
+                              ⚡ {m.latency_ms} ms
+                            </span>
+                          ) : null}
+                        </div>
+
+                        {/* Technical Specs 2x2 Grid */}
+                        <div style={{
+                          display: 'grid',
+                          gridTemplateColumns: 'repeat(2, 1fr)',
+                          gap: '8px',
+                          background: 'rgba(0,0,0,0.2)',
+                          borderRadius: 'var(--radius-sm)',
+                          padding: '10px',
+                          marginBottom: '14px',
+                          fontSize: '0.78rem'
+                        }}>
+                          <div>
+                            <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.72rem' }}>Ngữ cảnh tối đa</span>
+                            <span style={{ fontWeight: 600, color: '#e2e8f0' }}>{m.context_window.toLocaleString()} tokens</span>
+                          </div>
+                          <div>
+                            <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.72rem' }}>Phản hồi tối đa</span>
+                            <span style={{ fontWeight: 600, color: '#e2e8f0' }}>{m.max_tokens.toLocaleString()} tokens</span>
+                          </div>
+                          <div>
+                            <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.72rem' }}>Streaming SSE</span>
+                            <span style={{ fontWeight: 600, color: m.supports_streaming ? '#34d399' : '#94a3b8' }}>
+                              {m.supports_streaming ? '✓ Hỗ trợ' : '✗ Không'}
+                            </span>
+                          </div>
+                          <div>
+                            <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.72rem' }}>Kiểm tra gần nhất</span>
+                            <span style={{ fontWeight: 500, color: '#94a3b8' }}>
+                              {m.last_checked_at ? new Date(m.last_checked_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'Chưa đo'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Actions Footer Toolbar */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
+                        {/* Action Row 1: Ping Test & Edit Model */}
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <button
+                            type="button"
+                            onClick={() => handleTestConnection(m)}
+                            disabled={isTesting}
+                            title="Kiểm tra kết nối và đo độ trễ tới API nhà cung cấp"
+                            style={{
+                              flex: 1,
+                              padding: '8px 10px',
+                              borderRadius: 'var(--radius-sm)',
+                              background: 'rgba(56, 189, 248, 0.1)',
+                              border: '1px solid rgba(56, 189, 248, 0.3)',
+                              color: '#38bdf8',
+                              fontSize: '0.8rem',
+                              fontWeight: 600,
+                              cursor: isTesting ? 'wait' : 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: '6px'
+                            }}
+                          >
+                            <span>{isTesting ? '⏳' : '⚡'}</span>
+                            <span>{isTesting ? 'Đang ping...' : 'Ping test'}</span>
+                          </button>
+
+                          {/* Edit Button (FR-036) */}
+                          <button
+                            type="button"
+                            onClick={() => openEditModal(m)}
+                            title="Chỉnh sửa tham số kỹ thuật mô hình (FR-036)"
+                            style={{
+                              flex: 1,
+                              padding: '8px 10px',
+                              borderRadius: 'var(--radius-sm)',
+                              background: 'rgba(99, 102, 241, 0.12)',
+                              border: '1px solid rgba(99, 102, 241, 0.35)',
+                              color: '#a5b4fc',
+                              fontSize: '0.8rem',
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: '6px'
+                            }}
+                          >
+                            <span>✏️</span>
+                            <span>Sửa</span>
+                          </button>
+                        </div>
+
+                        {/* Action Row 2: Toggle Status & Soft Archive */}
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          {/* Soft Toggle Button (Activate or Deactivate) */}
+                          {m.status === 'ACTIVE' ? (
                             <button
                               type="button"
-                              onClick={() => handleTestConnection(m)}
-                              disabled={isTesting}
-                              title="Kiểm tra kết nối và đo độ trễ tới API nhà cung cấp"
+                              onClick={() => handleDeactivateModel(m)}
+                              disabled={isToggling || m.is_default}
+                              title={m.is_default ? 'Không thể tạm dừng mô hình đang làm mặc định (BR-013)' : 'Tạm dừng mô hình (Soft toggle - BR-012)'}
                               style={{
                                 flex: 1,
                                 padding: '8px 10px',
                                 borderRadius: 'var(--radius-sm)',
-                                background: 'rgba(56, 189, 248, 0.1)',
-                                border: '1px solid rgba(56, 189, 248, 0.3)',
-                                color: '#38bdf8',
+                                background: m.is_default ? 'rgba(255,255,255,0.04)' : 'rgba(239, 68, 68, 0.1)',
+                                border: m.is_default ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(239, 68, 68, 0.3)',
+                                color: m.is_default ? 'var(--text-muted)' : '#f87171',
                                 fontSize: '0.8rem',
                                 fontWeight: 600,
-                                cursor: isTesting ? 'wait' : 'pointer',
+                                cursor: (isToggling || m.is_default) ? 'not-allowed' : 'pointer',
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
                                 gap: '6px'
                               }}
                             >
-                              <span>{isTesting ? '⏳' : '⚡'}</span>
-                              <span>{isTesting ? 'Đang ping...' : 'Ping test'}</span>
+                              <span>{isToggling ? '⏳' : '⏸️'}</span>
+                              <span>{isToggling ? 'Đang xử lý...' : 'Tạm dừng'}</span>
                             </button>
-
-                            {/* Soft Toggle Button (Activate or Deactivate - BR-012) */}
-                            {m.status === 'ACTIVE' ? (
-                              <button
-                                type="button"
-                                onClick={() => handleDeactivateModel(m)}
-                                disabled={isToggling || m.is_default}
-                                title={m.is_default ? 'Không thể tạm dừng mô hình đang làm mặc định (BR-013)' : 'Tạm dừng mô hình (Soft toggle - BR-012)'}
-                                style={{
-                                  flex: 1,
-                                  padding: '8px 10px',
-                                  borderRadius: 'var(--radius-sm)',
-                                  background: m.is_default ? 'rgba(255,255,255,0.04)' : 'rgba(239, 68, 68, 0.1)',
-                                  border: m.is_default ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(239, 68, 68, 0.3)',
-                                  color: m.is_default ? 'var(--text-muted)' : '#f87171',
-                                  fontSize: '0.8rem',
-                                  fontWeight: 600,
-                                  cursor: (isToggling || m.is_default) ? 'not-allowed' : 'pointer',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center',
-                                  gap: '6px'
-                                }}
-                              >
-                                <span>{isToggling ? '⏳' : '⏸️'}</span>
-                                <span>{isToggling ? 'Đang xử lý...' : 'Tạm dừng'}</span>
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => handleActivateModel(m)}
-                                disabled={isToggling}
-                                title="Kích hoạt mô hình đưa vào giao diện chat"
-                                style={{
-                                  flex: 1,
-                                  padding: '8px 10px',
-                                  borderRadius: 'var(--radius-sm)',
-                                  background: 'rgba(16, 185, 129, 0.12)',
-                                  border: '1px solid rgba(16, 185, 129, 0.35)',
-                                  color: '#34d399',
-                                  fontSize: '0.8rem',
-                                  fontWeight: 600,
-                                  cursor: isToggling ? 'wait' : 'pointer',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center',
-                                  gap: '6px'
-                                }}
-                              >
-                                <span>{isToggling ? '⏳' : '▶️'}</span>
-                                <span>{isToggling ? 'Đang xử lý...' : 'Kích hoạt'}</span>
-                              </button>
-                            )}
-                          </div>
-
-                          {/* Set As Default Button */}
-                          {!m.is_default && (
+                          ) : (
                             <button
                               type="button"
-                              onClick={() => handleSetDefaultModel(m)}
-                              disabled={isSettingDef || m.status !== 'ACTIVE'}
-                              title={m.status !== 'ACTIVE' ? 'Chỉ có thể đặt mô hình đang ACTIVE làm mặc định' : 'Thiết lập làm mô hình mặc định cho các phiên chat mới'}
+                              onClick={() => handleActivateModel(m)}
+                              disabled={isToggling}
+                              title="Kích hoạt mô hình đưa vào giao diện chat"
                               style={{
-                                width: '100%',
-                                padding: '6px 12px',
+                                flex: 1,
+                                padding: '8px 10px',
                                 borderRadius: 'var(--radius-sm)',
-                                background: m.status === 'ACTIVE' ? 'rgba(245, 158, 11, 0.1)' : 'rgba(255,255,255,0.03)',
-                                border: m.status === 'ACTIVE' ? '1px solid rgba(245, 158, 11, 0.3)' : '1px solid var(--border-subtle)',
-                                color: m.status === 'ACTIVE' ? '#fbbf24' : 'var(--text-muted)',
-                                fontSize: '0.78rem',
+                                background: 'rgba(16, 185, 129, 0.12)',
+                                border: '1px solid rgba(16, 185, 129, 0.35)',
+                                color: '#34d399',
+                                fontSize: '0.8rem',
                                 fontWeight: 600,
-                                cursor: (isSettingDef || m.status !== 'ACTIVE') ? 'not-allowed' : 'pointer',
+                                cursor: isToggling ? 'wait' : 'pointer',
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
                                 gap: '6px'
                               }}
                             >
-                              <span>⭐</span>
-                              <span>{isSettingDef ? 'Đang thiết lập...' : 'Đặt làm mô hình mặc định'}</span>
+                              <span>{isToggling ? '⏳' : '▶️'}</span>
+                              <span>{isToggling ? 'Đang xử lý...' : isArchived ? 'Khôi phục' : 'Kích hoạt'}</span>
                             </button>
                           )}
+
+                          {/* Soft Archive Button (FR-039, BR-023) */}
+                          <button
+                            type="button"
+                            onClick={() => setConfirmArchiveModel(m)}
+                            disabled={m.is_default || isArchived || isArchiving}
+                            title={
+                              m.is_default
+                                ? 'Không thể lưu trữ mô hình mặc định hệ thống (BR-023)'
+                                : isArchived
+                                ? 'Mô hình đã nằm trong trạng thái lưu trữ'
+                                : 'Xóa mềm / Chuyển vào trạng thái lưu trữ an toàn (FR-039)'
+                            }
+                            style={{
+                              flex: 1,
+                              padding: '8px 10px',
+                              borderRadius: 'var(--radius-sm)',
+                              background: (m.is_default || isArchived) ? 'rgba(255,255,255,0.03)' : 'rgba(244, 63, 94, 0.1)',
+                              border: (m.is_default || isArchived) ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(244, 63, 94, 0.3)',
+                              color: (m.is_default || isArchived) ? 'var(--text-muted)' : '#fb7185',
+                              fontSize: '0.8rem',
+                              fontWeight: 600,
+                              cursor: (m.is_default || isArchived || isArchiving) ? 'not-allowed' : 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: '6px'
+                            }}
+                          >
+                            <span>📦</span>
+                            <span>{isArchived ? 'Đã lưu trữ' : 'Lưu trữ'}</span>
+                          </button>
                         </div>
+
+                        {/* Set As Default Button */}
+                        {!m.is_default && !isArchived && (
+                          <button
+                            type="button"
+                            onClick={() => handleSetDefaultModel(m)}
+                            disabled={isSettingDef || m.status !== 'ACTIVE'}
+                            title={m.status !== 'ACTIVE' ? 'Chỉ có thể đặt mô hình đang ACTIVE làm mặc định' : 'Thiết lập làm mô hình mặc định cho các phiên chat mới'}
+                            style={{
+                              width: '100%',
+                              padding: '6px 12px',
+                              borderRadius: 'var(--radius-sm)',
+                              background: m.status === 'ACTIVE' ? 'rgba(245, 158, 11, 0.1)' : 'rgba(255,255,255,0.03)',
+                              border: m.status === 'ACTIVE' ? '1px solid rgba(245, 158, 11, 0.3)' : '1px solid var(--border-subtle)',
+                              color: m.status === 'ACTIVE' ? '#fbbf24' : 'var(--text-muted)',
+                              fontSize: '0.78rem',
+                              fontWeight: 600,
+                              cursor: (isSettingDef || m.status !== 'ACTIVE') ? 'not-allowed' : 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: '6px'
+                            }}
+                          >
+                            <span>⭐</span>
+                            <span>{isSettingDef ? 'Đang thiết lập...' : 'Đặt làm mô hình mặc định'}</span>
+                          </button>
+                        )}
                       </div>
-                    );
-                  })}
+                    </div>
+                  );
+                })}
               </div>
             )}
 
-            {/* Invariant Policy Callout Box (BR-012, BR-013, BR-014, BR-015) */}
+            {/* Invariant Policy Callout Box (BR-012, BR-022, BR-023, BR-024) */}
             <div style={{
               background: 'rgba(30, 41, 59, 0.5)',
               border: '1px solid rgba(99, 102, 241, 0.25)',
@@ -1724,19 +2093,494 @@ export default function SettingsPage() {
               </div>
               <ul style={{ listStyleType: 'disc', paddingLeft: '1.25rem', color: 'var(--text-secondary)' }}>
                 <li>
-                  <strong style={{ color: '#fff' }}>BR-012 (Không xóa cứng):</strong> Hệ thống tuyệt đối không cung cấp thao tác xóa vật lý (Hard Delete) mô hình khỏi CSDL để bảo toàn tính toàn vẹn của lịch sử đàm thoại và số liệu token. Thay vào đó, áp dụng cơ chế <em>Soft Toggle</em> (Kích hoạt ↔ Tạm dừng).
+                  <strong style={{ color: '#fff' }}>BR-022 (Bất biến ID & Provider):</strong> Mã ID và hãng cung cấp là bất biến sau khi khởi tạo nhằm bảo vệ toàn vẹn khóa ngoại trong lịch sử hội thoại và số liệu đo đạc tài nguyên.
                 </li>
                 <li>
-                  <strong style={{ color: '#fff' }}>BR-013 (Bảo toàn mô hình mặc định):</strong> Hệ thống luôn duy trì ít nhất 1 mô hình ở trạng thái <code>ACTIVE</code> làm mặc định. Bạn không thể hủy kích hoạt mô hình đang là mặc định trước khi chỉ định mô hình thay thế.
+                  <strong style={{ color: '#fff' }}>BR-023 (Bảo toàn mô hình mặc định):</strong> Tuyệt đối không thể lưu trữ (xóa mềm) hoặc hủy kích hoạt mô hình đang giữ cờ mặc định (<code>is_default = 1</code>). Hãy chọn mô hình khác làm mặc định trước.
                 </li>
                 <li>
-                  <strong style={{ color: '#fff' }}>BR-014 (Kiểm tra khóa API):</strong> Việc kích hoạt mô hình đòi hỏi API Key tương ứng phải được cấu hình trong tệp <code>.env</code> tại backend.
+                  <strong style={{ color: '#fff' }}>BR-024 (Giới hạn biên an toàn):</strong> Tham số kỹ thuật bắt buộc phải thỏa mãn <code>Context Window &ge; 1,000</code>, <code>Max Tokens &ge; 256</code> và <code>Max Tokens &le; Context Window</code>.
                 </li>
                 <li>
-                  <strong style={{ color: '#fff' }}>FR-023 (Đo lường độ trễ):</strong> Nút <em>Ping test</em> kiểm tra kết nối trực tiếp Round-Trip tới API nhà cung cấp và tự động lưu độ trễ mới nhất vào cơ sở dữ liệu.
+                  <strong style={{ color: '#fff' }}>NFR-022 (SLA Tìm kiếm & Lọc):</strong> Thời gian thực thi tra cứu động được đo lường và đáp ứng ngưỡng dưới 200ms.
                 </li>
               </ul>
             </div>
+
+            {/* ============================================================ */}
+            {/* MODAL 1: THÊM MÔ HÌNH MỚI (FR-035, OP-022)                  */}
+            {/* ============================================================ */}
+            {showCreateModal && (
+              <div style={{
+                position: 'fixed',
+                inset: 0,
+                background: 'rgba(0, 0, 0, 0.75)',
+                backdropFilter: 'blur(8px)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 1000,
+                padding: '1rem'
+              }}>
+                <div style={{
+                  background: '#0f172a',
+                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  borderRadius: 'var(--radius-lg)',
+                  padding: '2rem',
+                  maxWidth: '520px',
+                  width: '100%',
+                  boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.8)'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
+                    <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span>✨</span>
+                      <span>Đăng Ký Mô Hình AI Mới (FR-035)</span>
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => setShowCreateModal(false)}
+                      style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: '1.25rem', cursor: 'pointer' }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <form onSubmit={handleCreateModel}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
+                      {/* Model ID */}
+                      <div>
+                        <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '4px' }}>
+                          Mã định danh Model ID (Duy nhất toàn cục) *
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={createModelForm.id}
+                          onChange={(e) => setCreateModelForm(prev => ({ ...prev, id: e.target.value }))}
+                          placeholder="ví dụ: claude-3-5-sonnet, gpt-4.5-turbo..."
+                          style={{
+                            width: '100%',
+                            padding: '10px 12px',
+                            borderRadius: 'var(--radius-sm)',
+                            background: 'rgba(0,0,0,0.4)',
+                            border: '1px solid var(--border-subtle)',
+                            color: '#fff',
+                            fontSize: '0.85rem',
+                            fontFamily: 'var(--font-mono)'
+                          }}
+                        />
+                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Mã ID là bất biến sau khi lưu (BR-022).</span>
+                      </div>
+
+                      {/* Display Name */}
+                      <div>
+                        <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '4px' }}>
+                          Tên hiển thị mô hình *
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={createModelForm.name}
+                          onChange={(e) => setCreateModelForm(prev => ({ ...prev, name: e.target.value }))}
+                          placeholder="ví dụ: Anthropic Claude 3.5 Sonnet..."
+                          style={{
+                            width: '100%',
+                            padding: '10px 12px',
+                            borderRadius: 'var(--radius-sm)',
+                            background: 'rgba(0,0,0,0.4)',
+                            border: '1px solid var(--border-subtle)',
+                            color: '#fff',
+                            fontSize: '0.85rem'
+                          }}
+                        />
+                      </div>
+
+                      {/* Provider */}
+                      <div>
+                        <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '4px' }}>
+                          Hãng cung cấp (Provider) *
+                        </label>
+                        <select
+                          value={createModelForm.provider}
+                          onChange={(e) => setCreateModelForm(prev => ({ ...prev, provider: e.target.value }))}
+                          style={{
+                            width: '100%',
+                            padding: '10px 12px',
+                            borderRadius: 'var(--radius-sm)',
+                            background: '#1e293b',
+                            border: '1px solid var(--border-subtle)',
+                            color: '#fff',
+                            fontSize: '0.85rem',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          <option value="google">Google Gemini</option>
+                          <option value="openai">OpenAI</option>
+                          <option value="anthropic">Anthropic</option>
+                          <option value="groq">Groq</option>
+                          <option value="ollama">Ollama (Local)</option>
+                        </select>
+                      </div>
+
+                      {/* Specs: Context & Max Tokens 2 Columns */}
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                        <div>
+                          <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '4px' }}>
+                            Ngữ cảnh tối đa (tokens)
+                          </label>
+                          <input
+                            type="number"
+                            min="1000"
+                            value={createModelForm.context_window}
+                            onChange={(e) => setCreateModelForm(prev => ({ ...prev, context_window: parseInt(e.target.value) || 1000 }))}
+                            style={{
+                              width: '100%',
+                              padding: '10px 12px',
+                              borderRadius: 'var(--radius-sm)',
+                              background: 'rgba(0,0,0,0.4)',
+                              border: '1px solid var(--border-subtle)',
+                              color: '#fff',
+                              fontSize: '0.85rem'
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '4px' }}>
+                            Phản hồi tối đa (tokens)
+                          </label>
+                          <input
+                            type="number"
+                            min="256"
+                            value={createModelForm.max_tokens}
+                            onChange={(e) => setCreateModelForm(prev => ({ ...prev, max_tokens: parseInt(e.target.value) || 256 }))}
+                            style={{
+                              width: '100%',
+                              padding: '10px 12px',
+                              borderRadius: 'var(--radius-sm)',
+                              background: 'rgba(0,0,0,0.4)',
+                              border: '1px solid var(--border-subtle)',
+                              color: '#fff',
+                              fontSize: '0.85rem'
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Streaming SSE Checkbox */}
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.85rem', color: '#e2e8f0' }}>
+                        <input
+                          type="checkbox"
+                          checked={createModelForm.supports_streaming}
+                          onChange={(e) => setCreateModelForm(prev => ({ ...prev, supports_streaming: e.target.checked }))}
+                        />
+                        <span>Mô hình hỗ trợ truyền luồng thời gian thực (Streaming SSE)</span>
+                      </label>
+                    </div>
+
+                    {/* Actions */}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                      <button
+                        type="button"
+                        onClick={() => setShowCreateModal(false)}
+                        style={{
+                          padding: '8px 16px',
+                          borderRadius: 'var(--radius-sm)',
+                          background: 'rgba(255,255,255,0.06)',
+                          border: '1px solid var(--border-subtle)',
+                          color: '#fff',
+                          fontSize: '0.85rem',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        Hủy
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={creatingModel}
+                        style={{
+                          padding: '8px 20px',
+                          borderRadius: 'var(--radius-sm)',
+                          background: 'linear-gradient(135deg, #4f46e5, #7c3aed)',
+                          border: 'none',
+                          color: '#fff',
+                          fontSize: '0.85rem',
+                          fontWeight: 600,
+                          cursor: creatingModel ? 'wait' : 'pointer'
+                        }}
+                      >
+                        {creatingModel ? 'Đang lưu...' : 'Lưu mô hình'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+
+            {/* ============================================================ */}
+            {/* MODAL 2: HIỆU CHỈNH CẤU HÌNH MÔ HÌNH (FR-036, OP-023)        */}
+            {/* ============================================================ */}
+            {editingModel && (
+              <div style={{
+                position: 'fixed',
+                inset: 0,
+                background: 'rgba(0, 0, 0, 0.75)',
+                backdropFilter: 'blur(8px)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 1000,
+                padding: '1rem'
+              }}>
+                <div style={{
+                  background: '#0f172a',
+                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  borderRadius: 'var(--radius-lg)',
+                  padding: '2rem',
+                  maxWidth: '520px',
+                  width: '100%',
+                  boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.8)'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
+                    <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span>✏️</span>
+                      <span>Chỉnh Sửa Cấu Hình Mô Hình (FR-036)</span>
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => setEditingModel(null)}
+                      style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: '1.25rem', cursor: 'pointer' }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <form onSubmit={handleUpdateModel}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
+                      {/* Immutable ID & Provider Info */}
+                      <div style={{
+                        padding: '10px 14px',
+                        background: 'rgba(0,0,0,0.35)',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: 'var(--radius-sm)',
+                        fontSize: '0.8rem',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center'
+                      }}>
+                        <div>
+                          <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>Mã định danh ID:</div>
+                          <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: '#e2e8f0' }}>{editingModel.id}</div>
+                        </div>
+                        <div>
+                          <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>Nhà cung cấp:</div>
+                          <div style={{ fontWeight: 600, color: '#38bdf8' }}>{editingModel.provider.toUpperCase()}</div>
+                        </div>
+                        <span style={{ fontSize: '0.7rem', color: '#fbbf24', background: 'rgba(245, 158, 11, 0.12)', padding: '2px 6px', borderRadius: '4px' }}>
+                          Bất biến (BR-022)
+                        </span>
+                      </div>
+
+                      {/* Display Name */}
+                      <div>
+                        <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '4px' }}>
+                          Tên hiển thị mô hình *
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={editModelForm.name}
+                          onChange={(e) => setEditModelForm(prev => ({ ...prev, name: e.target.value }))}
+                          style={{
+                            width: '100%',
+                            padding: '10px 12px',
+                            borderRadius: 'var(--radius-sm)',
+                            background: 'rgba(0,0,0,0.4)',
+                            border: '1px solid var(--border-subtle)',
+                            color: '#fff',
+                            fontSize: '0.85rem'
+                          }}
+                        />
+                      </div>
+
+                      {/* Specs: Context & Max Tokens 2 Columns */}
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                        <div>
+                          <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '4px' }}>
+                            Ngữ cảnh tối đa (tokens)
+                          </label>
+                          <input
+                            type="number"
+                            min="1000"
+                            value={editModelForm.context_window}
+                            onChange={(e) => setEditModelForm(prev => ({ ...prev, context_window: parseInt(e.target.value) || 1000 }))}
+                            style={{
+                              width: '100%',
+                              padding: '10px 12px',
+                              borderRadius: 'var(--radius-sm)',
+                              background: 'rgba(0,0,0,0.4)',
+                              border: '1px solid var(--border-subtle)',
+                              color: '#fff',
+                              fontSize: '0.85rem'
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '4px' }}>
+                            Phản hồi tối đa (tokens)
+                          </label>
+                          <input
+                            type="number"
+                            min="256"
+                            value={editModelForm.max_tokens}
+                            onChange={(e) => setEditModelForm(prev => ({ ...prev, max_tokens: parseInt(e.target.value) || 256 }))}
+                            style={{
+                              width: '100%',
+                              padding: '10px 12px',
+                              borderRadius: 'var(--radius-sm)',
+                              background: 'rgba(0,0,0,0.4)',
+                              border: '1px solid var(--border-subtle)',
+                              color: '#fff',
+                              fontSize: '0.85rem'
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Streaming SSE Checkbox */}
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.85rem', color: '#e2e8f0' }}>
+                        <input
+                          type="checkbox"
+                          checked={editModelForm.supports_streaming}
+                          onChange={(e) => setEditModelForm(prev => ({ ...prev, supports_streaming: e.target.checked }))}
+                        />
+                        <span>Mô hình hỗ trợ truyền luồng thời gian thực (Streaming SSE)</span>
+                      </label>
+                    </div>
+
+                    {/* Actions */}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                      <button
+                        type="button"
+                        onClick={() => setEditingModel(null)}
+                        style={{
+                          padding: '8px 16px',
+                          borderRadius: 'var(--radius-sm)',
+                          background: 'rgba(255,255,255,0.06)',
+                          border: '1px solid var(--border-subtle)',
+                          color: '#fff',
+                          fontSize: '0.85rem',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        Hủy
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={updatingModel}
+                        style={{
+                          padding: '8px 20px',
+                          borderRadius: 'var(--radius-sm)',
+                          background: 'linear-gradient(135deg, #4f46e5, #7c3aed)',
+                          border: 'none',
+                          color: '#fff',
+                          fontSize: '0.85rem',
+                          fontWeight: 600,
+                          cursor: updatingModel ? 'wait' : 'pointer'
+                        }}
+                      >
+                        {updatingModel ? 'Đang cập nhật...' : 'Cập nhật cấu hình'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+
+            {/* ============================================================ */}
+            {/* MODAL 3: XÁC NHẬN LƯU TRỮ MÔ HÌNH (FR-039, BR-023)           */}
+            {/* ============================================================ */}
+            {confirmArchiveModel && (
+              <div style={{
+                position: 'fixed',
+                inset: 0,
+                background: 'rgba(0, 0, 0, 0.75)',
+                backdropFilter: 'blur(8px)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 1000,
+                padding: '1rem'
+              }}>
+                <div style={{
+                  background: '#0f172a',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  borderRadius: 'var(--radius-lg)',
+                  padding: '2rem',
+                  maxWidth: '460px',
+                  width: '100%',
+                  boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.8)'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '1rem' }}>
+                    <span style={{ fontSize: '1.5rem' }}>📦</span>
+                    <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#fff' }}>
+                      Xác Nhận Lưu Trữ Mô Hình (Soft Archive)
+                    </h3>
+                  </div>
+
+                  <p style={{ fontSize: '0.88rem', color: '#cbd5e1', lineHeight: 1.6, marginBottom: '1.25rem' }}>
+                    Bạn có chắc chắn muốn chuyển mô hình <strong style={{ color: '#fff' }}>{confirmArchiveModel.name}</strong> (<code>{confirmArchiveModel.id}</code>) vào trạng thái <strong>ARCHIVED</strong> không?
+                  </p>
+
+                  <div style={{
+                    padding: '10px 12px',
+                    borderRadius: 'var(--radius-sm)',
+                    background: 'rgba(239, 68, 68, 0.1)',
+                    border: '1px solid rgba(239, 68, 68, 0.25)',
+                    fontSize: '0.78rem',
+                    color: '#fca5a5',
+                    lineHeight: 1.5,
+                    marginBottom: '1.5rem'
+                  }}>
+                    🛡️ <strong>Bảo toàn dữ liệu (BR-012):</strong> Thao tác này là xóa mềm, mô hình sẽ ẩn khỏi danh sách chat nhưng toàn bộ lịch sử tin nhắn và dữ liệu tiêu thụ tài nguyên vẫn được bảo tồn trọn vẹn. Bạn có thể kích hoạt lại bất cứ lúc nào.
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmArchiveModel(null)}
+                      style={{
+                        padding: '8px 16px',
+                        borderRadius: 'var(--radius-sm)',
+                        background: 'rgba(255,255,255,0.06)',
+                        border: '1px solid var(--border-subtle)',
+                        color: '#fff',
+                        fontSize: '0.85rem',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      Hủy bỏ
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleArchiveModel(confirmArchiveModel)}
+                      disabled={archivingModelId === confirmArchiveModel.id}
+                      style={{
+                        padding: '8px 20px',
+                        borderRadius: 'var(--radius-sm)',
+                        background: '#e11d48',
+                        border: 'none',
+                        color: '#fff',
+                        fontSize: '0.85rem',
+                        fontWeight: 600,
+                        cursor: archivingModelId === confirmArchiveModel.id ? 'wait' : 'pointer'
+                      }}
+                    >
+                      {archivingModelId === confirmArchiveModel.id ? 'Đang lưu trữ...' : 'Xác nhận lưu trữ'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

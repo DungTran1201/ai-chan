@@ -52,6 +52,20 @@ def format_model_record(row: Dict[str, Any]) -> Dict[str, Any]:
 class SetDefaultModelRequest(BaseModel):
     model_id: str = Field(..., description="Định danh mô hình muốn đặt làm mặc định")
 
+class CreateModelRequest(BaseModel):
+    id: str = Field(..., min_length=1, max_length=100, description="Mã định danh duy nhất (bất biến) của mô hình")
+    name: str = Field(..., min_length=1, max_length=255, description="Tên hiển thị của mô hình")
+    provider: str = Field(..., description="Nhà cung cấp: google, anthropic, openai, groq, ollama")
+    context_window: int = Field(default=128000, ge=1000, description="Ngữ cảnh tối đa (tokens >= 1000)")
+    max_tokens: int = Field(default=4096, ge=256, description="Phản hồi tối đa (tokens >= 256)")
+    supports_streaming: bool = Field(default=True, description="Hỗ trợ SSE streaming")
+
+class UpdateModelRequest(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255, description="Tên hiển thị mới")
+    context_window: Optional[int] = Field(default=None, ge=1000, description="Ngữ cảnh tối đa (tokens >= 1000)")
+    max_tokens: Optional[int] = Field(default=None, ge=256, description="Phản hồi tối đa (tokens >= 256)")
+    supports_streaming: Optional[bool] = Field(default=None, description="Hỗ trợ SSE streaming")
+
 
 # ------------------------------------------------------------------------------
 # 6.1 GET /api/v1/models (FR-021, UC-016, OP-010)
@@ -59,18 +73,16 @@ class SetDefaultModelRequest(BaseModel):
 @models_router.get("", response_model=List[Dict[str, Any]])
 @models_router.get("/", response_model=List[Dict[str, Any]])
 async def list_models(
-    status_filter: Optional[str] = Query("ALL", alias="status", description="Bộ lọc trạng thái: ALL, ACTIVE, INACTIVE"),
+    status_filter: Optional[str] = Query("ALL", alias="status", description="Bộ lọc trạng thái: ALL, ACTIVE, INACTIVE, ARCHIVED, DEGRADED"),
     current_user: dict = Depends(get_current_user)
 ):
     """
     Lấy danh mục toàn bộ các mô hình Agent được cấu hình từ các nhà cung cấp bên ngoài.
-    Hỗ trợ lọc theo trạng thái (ALL, ACTIVE, INACTIVE) và tự động nhận diện khóa API từ .env.
+    Hỗ trợ lọc theo trạng thái (ALL, ACTIVE, INACTIVE, ARCHIVED) và tự động nhận diện khóa API từ .env.
     """
     filter_upper = (status_filter or "ALL").upper().strip()
-    if filter_upper == "ACTIVE":
-        rows = query_all("SELECT * FROM models WHERE status = 'ACTIVE' ORDER BY is_default DESC, name ASC")
-    elif filter_upper == "INACTIVE":
-        rows = query_all("SELECT * FROM models WHERE status = 'INACTIVE' ORDER BY is_default DESC, name ASC")
+    if filter_upper in ("ACTIVE", "INACTIVE", "ARCHIVED", "DEGRADED"):
+        rows = query_all("SELECT * FROM models WHERE status = ? ORDER BY is_default DESC, name ASC", (filter_upper,))
     else:
         rows = query_all("SELECT * FROM models ORDER BY is_default DESC, status ASC, name ASC")
 
@@ -78,8 +90,130 @@ async def list_models(
 
 
 # ------------------------------------------------------------------------------
+# 6.7 POST /api/v1/models (FR-035, UC-MOD-001, OP-022, BR-022, BR-024, SEC-010)
+# ------------------------------------------------------------------------------
+@models_router.post("", status_code=status.HTTP_201_CREATED)
+@models_router.post("/", status_code=status.HTTP_201_CREATED)
+async def create_model(
+    req: CreateModelRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Đăng ký mô hình LLM mới vào danh mục hệ thống (FR-035, OP-022).
+    Ràng buộc:
+    - ID là duy nhất toàn cục, cấm trùng lặp (BR-022).
+    - Provider thuộc danh mục hỗ trợ: google, anthropic, openai, groq, ollama.
+    - Giới hạn biên an toàn: context_window >= 1000, max_tokens >= 256, max_tokens <= context_window (BR-024).
+    """
+    # BR-024: Kiểm tra ngưỡng biên an toàn
+    if req.max_tokens > req.context_window:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Tham số max_tokens ({req.max_tokens}) không được vượt quá context_window ({req.context_window}) (BR-024)."
+        )
+
+    provider_clean = req.provider.lower().strip()
+    valid_providers = ("google", "anthropic", "openai", "groq", "ollama")
+    if provider_clean not in valid_providers:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Nhà cung cấp không hợp lệ '{req.provider}'. Phải là một trong: {', '.join(valid_providers)}."
+        )
+
+    # BR-022: Kiểm tra tính duy nhất của ID mô hình
+    existing = query_one("SELECT id FROM models WHERE id = ?", (req.id.strip(),))
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Mô hình với mã định danh '{req.id.strip()}' đã tồn tại trong hệ thống (BR-022)."
+        )
+
+    execute_commit(
+        """
+        INSERT INTO models (id, name, provider, status, is_default, context_window, max_tokens, supports_streaming)
+        VALUES (?, ?, ?, 'INACTIVE', 0, ?, ?, ?)
+        """,
+        (
+            req.id.strip(),
+            req.name.strip(),
+            provider_clean,
+            req.context_window,
+            req.max_tokens,
+            1 if req.supports_streaming else 0
+        )
+    )
+
+    created_row = query_one("SELECT * FROM models WHERE id = ?", (req.id.strip(),))
+    record = format_model_record(created_row)
+    record["message"] = "Đăng ký mô hình mới thành công."
+    return record
+
+
+# ------------------------------------------------------------------------------
+# 6.9 GET /api/v1/models/search (FR-037, FR-038, NFR-022, OP-024, UC-MOD-003)
+# Lưu ý: Đặt route này trước /{model_id} để tránh nhầm lẫn path parameter
+# ------------------------------------------------------------------------------
+@models_router.get("/search")
+async def search_models(
+    q: Optional[str] = Query(None, description="Từ khóa tìm kiếm theo tên hoặc ID"),
+    provider: Optional[str] = Query("ALL", description="Lọc theo nhà cung cấp"),
+    status_filter: Optional[str] = Query("ALL", alias="status", description="Lọc theo trạng thái: ALL, ACTIVE, INACTIVE, ARCHIVED, DEGRADED"),
+    has_api_key: Optional[bool] = Query(None, description="Lọc theo tình trạng cấu hình API Key"),
+    is_default: Optional[bool] = Query(None, description="Lọc theo cờ mặc định"),
+    sort: Optional[str] = Query("name_asc", description="Sắp xếp: name_asc, latency_asc, context_desc"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Tìm kiếm toàn văn và lọc đa thuộc tính danh mục mô hình với SLA độ trễ <= 200ms (FR-037, FR-038, NFR-022).
+    """
+    start_time = time.perf_counter()
+
+    sql = "SELECT * FROM models WHERE 1=1"
+    params: List[Any] = []
+
+    if q and q.strip():
+        kw = f"%{q.strip()}%"
+        sql += " AND (name LIKE ? OR id LIKE ?)"
+        params.extend([kw, kw])
+
+    if provider and provider.upper() != "ALL":
+        sql += " AND LOWER(provider) = ?"
+        params.append(provider.lower().strip())
+
+    if status_filter and status_filter.upper() != "ALL":
+        sql += " AND status = ?"
+        params.append(status_filter.upper().strip())
+
+    if is_default is not None:
+        sql += " AND is_default = ?"
+        params.append(1 if is_default else 0)
+
+    # Sắp xếp
+    if sort == "latency_asc":
+        sql += " ORDER BY CASE WHEN latency_ms IS NULL THEN 1 ELSE 0 END, latency_ms ASC, name ASC"
+    elif sort == "context_desc":
+        sql += " ORDER BY context_window DESC, name ASC"
+    else:
+        sql += " ORDER BY is_default DESC, name ASC"
+
+    rows = query_all(sql, tuple(params))
+    items = [format_model_record(r) for r in rows]
+
+    # Lọc tiếp theo has_api_key nếu có
+    if has_api_key is not None:
+        items = [item for item in items if item["has_api_key"] == has_api_key]
+
+    execution_time_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+    return {
+        "total": len(items),
+        "execution_time_ms": execution_time_ms,
+        "items": items
+    }
+
+
+# ------------------------------------------------------------------------------
 # 6.6 PATCH /api/v1/models/default (FR-026, UC-020, BR-013, OP-015)
-# Lưu ý: Đặt route này trước /{model_id} để tránh xung đột path parameter
 # ------------------------------------------------------------------------------
 @models_router.patch("/default")
 async def set_default_model(
@@ -132,6 +266,100 @@ async def get_model_detail(
         )
 
     return format_model_record(model)
+
+
+# ------------------------------------------------------------------------------
+# 6.8 PUT /api/v1/models/{model_id} (FR-036, UC-MOD-002, OP-023, BR-022, BR-024, SEC-010)
+# ------------------------------------------------------------------------------
+@models_router.put("/{model_id}")
+async def update_model(
+    model_id: str,
+    req: UpdateModelRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Cập nhật thông tin cấu hình mô hình hiện có (FR-036, OP-023).
+    Ràng buộc:
+    - ID và Provider là bất biến, không thể sửa đổi (BR-022).
+    - Giới hạn biên: context_window >= 1000, max_tokens >= 256, max_tokens <= context_window (BR-024).
+    """
+    model = query_one("SELECT * FROM models WHERE id = ?", (model_id,))
+    if not model:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Không tìm thấy mô hình với mã định danh '{model_id}'."
+        )
+
+    new_name = req.name.strip() if req.name is not None else model["name"]
+    new_cw = req.context_window if req.context_window is not None else model["context_window"]
+    new_mt = req.max_tokens if req.max_tokens is not None else model["max_tokens"]
+    new_streaming = (1 if req.supports_streaming else 0) if req.supports_streaming is not None else model["supports_streaming"]
+
+    # BR-024: Kiểm tra ngưỡng biên an toàn
+    if new_cw < 1000 or new_mt < 256:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Vi phạm ngưỡng an toàn: context_window >= 1000 và max_tokens >= 256 (BR-024)."
+        )
+    if new_mt > new_cw:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Tham số max_tokens ({new_mt}) không được vượt quá context_window ({new_cw}) (BR-024)."
+        )
+
+    execute_commit(
+        """
+        UPDATE models
+        SET name = ?, context_window = ?, max_tokens = ?, supports_streaming = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (new_name, new_cw, new_mt, new_streaming, model_id)
+    )
+
+    updated_row = query_one("SELECT * FROM models WHERE id = ?", (model_id,))
+    record = format_model_record(updated_row)
+    record["message"] = "Cập nhật cấu hình mô hình thành công."
+    return record
+
+
+# ------------------------------------------------------------------------------
+# 6.10 DELETE /api/v1/models/{model_id} (FR-039, UC-MOD-002, OP-025, BR-023, SEC-010)
+# ------------------------------------------------------------------------------
+@models_router.delete("/{model_id}")
+async def archive_model(
+    model_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Xóa mềm (chuyển sang ARCHIVED) mô hình khỏi danh mục hoạt động (FR-039, OP-025).
+    Ràng buộc:
+    - Không xóa vật lý dữ liệu (BR-012).
+    - Cấm tuyệt đối xóa mềm mô hình đang giữ cờ mặc định is_default = 1 (BR-023).
+    """
+    model = query_one("SELECT * FROM models WHERE id = ?", (model_id,))
+    if not model:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Không tìm thấy mô hình với mã định danh '{model_id}'."
+        )
+
+    # BR-023: Invariant Default Model Guard
+    if bool(model["is_default"]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Không thể lưu trữ mô hình '{model['name']}' vì đây là mô hình mặc định của hệ thống. Hãy chọn mô hình khác làm mặc định trước (BR-023)."
+        )
+
+    execute_commit(
+        "UPDATE models SET status = 'ARCHIVED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (model_id,)
+    )
+
+    return {
+        "model_id": model_id,
+        "status": "ARCHIVED",
+        "message": f"Đã chuyển mô hình '{model['name']}' vào trạng thái lưu trữ an toàn."
+    }
 
 
 # ------------------------------------------------------------------------------

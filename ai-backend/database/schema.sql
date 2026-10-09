@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS models (
     id VARCHAR(100) PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     provider VARCHAR(50) NOT NULL CHECK (provider IN ('google', 'anthropic', 'openai', 'groq', 'ollama')),
-    status VARCHAR(20) NOT NULL DEFAULT 'INACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'DEGRADED')),
+    status VARCHAR(20) NOT NULL DEFAULT 'INACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'DEGRADED', 'ARCHIVED')),
     is_default BOOLEAN NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
     context_window INTEGER NOT NULL DEFAULT 128000,
     max_tokens INTEGER NOT NULL DEFAULT 4096,

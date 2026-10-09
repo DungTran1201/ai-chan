@@ -33,6 +33,7 @@ class TestModelsAPI(unittest.TestCase):
 
     def tearDown(self):
         execute_commit("DELETE FROM users WHERE id = ?", (self.user_id,))
+        execute_commit("DELETE FROM models WHERE id LIKE 'test_%'")
         # Reset default model to gemini-3.8-flash and active state
         execute_commit("UPDATE models SET is_default = 0")
         execute_commit("UPDATE models SET is_default = 1, status = 'ACTIVE' WHERE id = 'gemini-3.8-flash'")
@@ -127,6 +128,159 @@ class TestModelsAPI(unittest.TestCase):
         response = self.client.post("/api/v1/models/gpt-4o-mini/test", cookies=self.cookies)
         self.assertEqual(response.status_code, 400)
         self.assertIn("chưa cấu hình api key", response.json()["detail"].lower())
+
+    # ==========================================================================
+    # TC-027: Thêm mô hình mới & Xác thực biên an toàn (FR-035, BR-022, BR-024)
+    # ==========================================================================
+    def test_create_model_success_and_validations(self):
+        # 1. Tạo thành công mô hình hợp lệ
+        payload = {
+            "id": "test_claude_35",
+            "name": "Claude 3.5 Test",
+            "provider": "anthropic",
+            "context_window": 128000,
+            "max_tokens": 4096,
+            "supports_streaming": True
+        }
+        res = self.client.post("/api/v1/models", json=payload, cookies=self.cookies)
+        self.assertEqual(res.status_code, 201)
+        data = res.json()
+        self.assertEqual(data["id"], "test_claude_35")
+        self.assertEqual(data["status"], "INACTIVE")
+        self.assertFalse(data["is_default"])
+
+        # 2. BR-022: Từ chối ID trùng lặp (409 Conflict)
+        res_dup = self.client.post("/api/v1/models", json=payload, cookies=self.cookies)
+        self.assertEqual(res_dup.status_code, 409)
+        self.assertIn("đã tồn tại", res_dup.json()["detail"].lower())
+
+        # 3. Provider không hợp lệ (422)
+        res_bad_p = self.client.post(
+            "/api/v1/models",
+            json={**payload, "id": "test_bad_provider", "provider": "invalid_vendor"},
+            cookies=self.cookies
+        )
+        self.assertEqual(res_bad_p.status_code, 422)
+
+        # 4. BR-024: max_tokens > context_window
+        res_bad_cw = self.client.post(
+            "/api/v1/models",
+            json={**payload, "id": "test_bad_cw", "context_window": 2000, "max_tokens": 3000},
+            cookies=self.cookies
+        )
+        self.assertEqual(res_bad_cw.status_code, 422)
+
+        # 5. BR-024: context_window < 1000
+        res_low_cw = self.client.post(
+            "/api/v1/models",
+            json={**payload, "id": "test_low_cw", "context_window": 500, "max_tokens": 300},
+            cookies=self.cookies
+        )
+        self.assertEqual(res_low_cw.status_code, 422)
+
+    # ==========================================================================
+    # TC-028: Hiệu chỉnh cấu hình mô hình & Tính bất biến (FR-036, BR-022, BR-024)
+    # ==========================================================================
+    def test_update_model_success_and_invariants(self):
+        # Tạo mô hình chuẩn bị sửa
+        self.client.post(
+            "/api/v1/models",
+            json={"id": "test_update_model", "name": "Original Name", "provider": "openai", "context_window": 100000, "max_tokens": 4096},
+            cookies=self.cookies
+        )
+
+        # 1. Cập nhật thành công
+        update_payload = {
+            "name": "Updated Name Pro",
+            "context_window": 150000,
+            "max_tokens": 8192,
+            "supports_streaming": False
+        }
+        res = self.client.put("/api/v1/models/test_update_model", json=update_payload, cookies=self.cookies)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["name"], "Updated Name Pro")
+        self.assertEqual(data["context_window"], 150000)
+        self.assertEqual(data["max_tokens"], 8192)
+        self.assertFalse(data["supports_streaming"])
+        # Provider và ID không thay đổi (BR-022)
+        self.assertEqual(data["id"], "test_update_model")
+        self.assertEqual(data["provider"], "openai")
+
+        # 2. Không tìm thấy mô hình (404)
+        res_404 = self.client.put("/api/v1/models/test_non_existent", json={"name": "New"}, cookies=self.cookies)
+        self.assertEqual(res_404.status_code, 404)
+
+        # 3. Vi phạm ngưỡng biên an toàn (BR-024)
+        res_err = self.client.put(
+            "/api/v1/models/test_update_model",
+            json={"context_window": 2000, "max_tokens": 5000},
+            cookies=self.cookies
+        )
+        self.assertEqual(res_err.status_code, 422)
+
+    # ==========================================================================
+    # TC-029: Tìm kiếm toàn văn & Bộ lọc đa tiêu chí (FR-037, FR-038, NFR-022)
+    # ==========================================================================
+    def test_search_and_filter_models(self):
+        # 1. Tìm kiếm theo từ khóa q
+        res_search = self.client.get("/api/v1/models/search?q=gemini", cookies=self.cookies)
+        self.assertEqual(res_search.status_code, 200)
+        data = res_search.json()
+        self.assertIn("execution_time_ms", data)
+        self.assertIn("items", data)
+        self.assertGreaterEqual(data["total"], 2)
+        # NFR-022 SLA <= 200ms
+        self.assertLessEqual(data["execution_time_ms"], 200.0)
+        for item in data["items"]:
+            self.assertTrue("gemini" in item["id"].lower() or "gemini" in item["name"].lower())
+
+        # 2. Lọc theo provider
+        res_provider = self.client.get("/api/v1/models/search?provider=openai", cookies=self.cookies)
+        self.assertEqual(res_provider.status_code, 200)
+        for item in res_provider.json()["items"]:
+            self.assertEqual(item["provider"], "openai")
+
+        # 3. Lọc theo status
+        res_status = self.client.get("/api/v1/models/search?status=ACTIVE", cookies=self.cookies)
+        self.assertEqual(res_status.status_code, 200)
+        for item in res_status.json()["items"]:
+            self.assertEqual(item["status"], "ACTIVE")
+
+        # 4. Sắp xếp theo ngữ cảnh context_desc
+        res_sort = self.client.get("/api/v1/models/search?sort=context_desc", cookies=self.cookies)
+        self.assertEqual(res_sort.status_code, 200)
+        items = res_sort.json()["items"]
+        if len(items) >= 2:
+            self.assertGreaterEqual(items[0]["context_window"], items[1]["context_window"])
+
+    # ==========================================================================
+    # TC-030: Xóa mềm & Chốt chặn bảo vệ mô hình mặc định (FR-039, BR-023)
+    # ==========================================================================
+    def test_soft_archive_model_and_default_guard(self):
+        # 1. BR-023: Chặn xóa mềm mô hình đang là mặc định (gemini-3.8-flash)
+        res_guard = self.client.delete("/api/v1/models/gemini-3.8-flash", cookies=self.cookies)
+        self.assertEqual(res_guard.status_code, 400)
+        self.assertIn("mặc định", res_guard.json()["detail"].lower())
+
+        # 2. Xóa mềm thành công mô hình không phải mặc định
+        self.client.post(
+            "/api/v1/models",
+            json={"id": "test_archive_target", "name": "Archive Target", "provider": "groq", "context_window": 100000, "max_tokens": 4096},
+            cookies=self.cookies
+        )
+        res_del = self.client.delete("/api/v1/models/test_archive_target", cookies=self.cookies)
+        self.assertEqual(res_del.status_code, 200)
+        self.assertEqual(res_del.json()["status"], "ARCHIVED")
+
+        # BR-012: Xác nhận bản ghi vẫn tồn tại trong CSDL với status = 'ARCHIVED'
+        row = query_one("SELECT * FROM models WHERE id = 'test_archive_target'")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "ARCHIVED")
+
+        # 3. Xóa mềm mô hình không tồn tại (404)
+        res_404 = self.client.delete("/api/v1/models/test_unknown_archive", cookies=self.cookies)
+        self.assertEqual(res_404.status_code, 404)
 
 if __name__ == "__main__":
     unittest.main()
